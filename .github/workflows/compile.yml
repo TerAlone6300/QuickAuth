@@ -57,12 +57,12 @@ jobs:
       - name: Compile (Windows)
         if: runner.os == 'Windows'
         run: |
-          python -m nuitka \
-            --onefile \
-            --standalone \
-            --assume-yes-for-downloads \
-            --lto=yes \
-            --output-filename=${{ matrix.output_name }}${{ matrix.ext }} \
+          python -m nuitka `
+            --onefile `
+            --standalone `
+            --assume-yes-for-downloads `
+            --lto=yes `
+            --output-filename=${{ matrix.output_name }}${{ matrix.ext }} `
             teralone_auth.py
 
       # --- Linux x86_64 Build (Native) ---
@@ -83,7 +83,6 @@ jobs:
             --standalone \
             --assume-yes-for-downloads \
             --lto=yes \
-            --strip \
             --plugin-enable=anti-bloat \
             --python-flag=no_docstrings \
             --python-flag=-O \
@@ -96,7 +95,7 @@ jobs:
         uses: uraimo/run-on-arch-action@v2
         with:
           arch: ${{ matrix.arch }}
-          distro: ubuntu22.04
+          distro: ${{ matrix.arch == 'i386' && 'ubuntu20.04' || 'ubuntu22.04' }}
           githubToken: ${{ github.token }}
           setup: |
             apt-get update
@@ -109,7 +108,6 @@ jobs:
               --standalone \
               --assume-yes-for-downloads \
               --lto=yes \
-              --strip \
               --plugin-enable=anti-bloat \
               --python-flag=no_docstrings \
               --python-flag=-O \
