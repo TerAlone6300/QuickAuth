@@ -1,81 +1,82 @@
 name: Compile and Release
 
 on:
-push:
+  push:
+    branches: [ "main" ]
 
 permissions:
-contents: write
+  contents: write
 
 jobs:
-build:
-strategy:
-matrix:
-include:
-- os: ubuntu-latest
-output_name: teralone_auth-linux
-ext: ""
-- os: windows-latest
-output_name: teralone_auth-windows
-ext: ".exe"
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            output_name: teralone_auth-linux
+            ext: ""
+          - os: windows-latest
+            output_name: teralone_auth-windows
+            ext: ".exe"
 
-runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
 
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.12"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-  - name: Install Nuitka
-    run: |
-      python -m pip install --upgrade pip
-      pip install nuitka
+      - name: Install Nuitka
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka
 
-  - name: Install Linux build tools
-    if: runner.os == 'Linux'
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y patchelf gcc g++
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf gcc g++
 
-  - name: Compile
-    shell: bash
-    run: |
-      python -m nuitka \
-        --onefile \
-        --standalone \
-        --assume-yes-for-downloads \
-        --output-filename=${{ matrix.output_name }}${{ matrix.ext }} \
-        teralone_auth.py
+      - name: Compile
+        shell: bash
+        run: |
+          python -m nuitka \
+            --onefile \
+            --standalone \
+            --assume-yes-for-downloads \
+            --output-filename=${{ matrix.output_name }}${{ matrix.ext }} \
+            teralone_auth.py
 
-  - name: Upload Artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: ${{ matrix.output_name }}
-      path: |
-        *.exe
-        teralone_auth-linux
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output_name }}
+          path: |
+            *.exe
+            teralone_auth-linux
 
-release:
-needs: build
-runs-on: ubuntu-latest
+  release:
+    needs: build
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Download artifacts
-    uses: actions/download-artifact@v4
-    with:
-      path: artifacts
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-  - name: Create Release
-    id: create_release
-    uses: softprops/action-gh-release@v2
-    with:
-      tag_name: build-${{ github.sha }}
-      name: Build ${{ github.sha }}
-      generate_release_notes: true
-      files: |
-        artifacts/**/*
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.sha }}
+          name: Build ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
