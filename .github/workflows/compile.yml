@@ -108,11 +108,14 @@ jobs:
         run: |
           docker run --rm --platform ${{ matrix.platform }} -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} /bin/bash -c "
             export DEBIAN_FRONTEND=noninteractive &&
-            sed -i 's/main$/main universe/' /etc/apt/sources.list &&
-            apt-get update && apt-get install -y python3 python3-pip patchelf gcc g++ python3-dev &&
+            apt-get update &&
+            apt-get install -y software-properties-common &&
+            add-apt-repository -y universe &&
+            apt-get update &&
+            apt-get install -y python3 python3-pip patchelf gcc g++ python3-dev &&
             python3 -m pip install --upgrade pip &&
             pip3 install nuitka zstandard &&
-            python3 -m nuitka --onefile --standalone --assume-yes-for-downloads --lto=yes --plugin-enable=anti-bloat --python-flag=no_docstrings --python-flag=-O --output-filename=${{ matrix.output_name }} teralone_auth.py &&
+            python3 -m nuitka --onefile --standalone --assume-yes-for-downloads --lto=no --jobs=1 --plugin-enable=anti-bloat --python-flag=no_docstrings --python-flag=-O --output-filename=${{ matrix.output_name }} teralone_auth.py &&
             chown \$HOST_UID:\$HOST_GID ${{ matrix.output_name }}
           "
 
