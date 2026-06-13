@@ -21,16 +21,19 @@ jobs:
             output_name: teralone_auth-linux-x86
             use_docker: true
             image: i386/ubuntu:20.04
+            platform: linux/386
           - os: ubuntu-latest
             arch: aarch64
             output_name: teralone_auth-linux-arm64
             use_docker: true
-            image: arm64v8/ubuntu:20.04
+            image: ubuntu:20.04
+            platform: linux/arm64
           - os: ubuntu-latest
             arch: armv7
             output_name: teralone_auth-linux-armv7
             use_docker: true
-            image: arm32v7/ubuntu:20.04
+            image: ubuntu:20.04
+            platform: linux/arm/v7
           - os: windows-latest
             arch: x64
             output_name: teralone_auth-windows-x64
