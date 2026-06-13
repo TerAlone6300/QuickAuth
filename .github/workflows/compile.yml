@@ -1,4 +1,4 @@
-name: Compile and Release
+name: Multi-Arch Compile and Release
 
 on:
   push:
@@ -10,13 +10,28 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            output_name: teralone_auth-linux
-            ext: ""
+            arch: x86_64
+            output_name: teralone_auth-linux-x64
+          - os: ubuntu-latest
+            arch: i386
+            output_name: teralone_auth-linux-x86
+          - os: ubuntu-latest
+            arch: aarch64
+            output_name: teralone_auth-linux-arm64
+          - os: ubuntu-latest
+            arch: armv7
+            output_name: teralone_auth-linux-armv7
           - os: windows-latest
-            output_name: teralone_auth-windows
+            arch: x64
+            output_name: teralone_auth-windows-x64
+            ext: ".exe"
+          - os: windows-latest
+            arch: x86
+            output_name: teralone_auth-windows-x86
             ext: ".exe"
 
     runs-on: ${{ matrix.os }}
@@ -25,58 +40,105 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      # --- Windows Build ---
+      - name: Setup Python (Windows)
+        if: runner.os == 'Windows'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.arch }}
 
-      - name: Install Nuitka
+      - name: Install Dependencies (Windows)
+        if: runner.os == 'Windows'
         run: |
           python -m pip install --upgrade pip
-          pip install nuitka
+          pip install nuitka zstandard
 
-      - name: Install Linux build tools
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf gcc g++
-
-      - name: Compile
-        shell: bash
+      - name: Compile (Windows)
+        if: runner.os == 'Windows'
         run: |
           python -m nuitka \
             --onefile \
             --standalone \
             --assume-yes-for-downloads \
+            --lto=yes \
             --output-filename=${{ matrix.output_name }}${{ matrix.ext }} \
             teralone_auth.py
+
+      # --- Linux x86_64 Build (Native) ---
+      - name: Setup Python (Linux x64)
+        if: runner.os == 'Linux' && matrix.arch == 'x86_64'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile (Linux x64)
+        if: runner.os == 'Linux' && matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update && sudo apt-get install -y patchelf gcc g++
+          python -m pip install --upgrade pip
+          pip install nuitka zstandard
+          python -m nuitka \
+            --onefile \
+            --standalone \
+            --assume-yes-for-downloads \
+            --lto=yes \
+            --strip \
+            --plugin-enable=anti-bloat \
+            --python-flag=no_docstrings \
+            --python-flag=-O \
+            --output-filename=${{ matrix.output_name }} \
+            teralone_auth.py
+
+      # --- Linux Multi-Arch Build (via QEMU) ---
+      - name: Compile (Linux Multi-Arch)
+        if: runner.os == 'Linux' && matrix.arch != 'x86_64'
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ubuntu22.04
+          githubToken: ${{ github.token }}
+          setup: |
+            apt-get update
+            apt-get install -y python3 python3-pip patchelf gcc g++ python3-dev
+          run: |
+            python3 -m pip install --upgrade pip
+            pip3 install nuitka zstandard
+            python3 -m nuitka \
+              --onefile \
+              --standalone \
+              --assume-yes-for-downloads \
+              --lto=yes \
+              --strip \
+              --plugin-enable=anti-bloat \
+              --python-flag=no_docstrings \
+              --python-flag=-O \
+              --output-filename=${{ matrix.output_name }} \
+              teralone_auth.py
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.output_name }}
-          path: |
-            *.exe
-            teralone_auth-linux
+          path: ${{ matrix.output_name }}${{ matrix.ext }}
 
   release:
     needs: build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: Create Release
-        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.sha }}
           name: Build ${{ github.sha }}
           generate_release_notes: true
           files: |
-            artifacts/**/*
+            artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
