@@ -19,12 +19,18 @@ jobs:
           - os: ubuntu-latest
             arch: i386
             output_name: teralone_auth-linux-x86
+            use_docker: true
+            image: i386/ubuntu:20.04
           - os: ubuntu-latest
             arch: aarch64
             output_name: teralone_auth-linux-arm64
+            use_docker: true
+            image: arm64v8/ubuntu:20.04
           - os: ubuntu-latest
             arch: armv7
             output_name: teralone_auth-linux-armv7
+            use_docker: true
+            image: arm32v7/ubuntu:20.04
           - os: windows-latest
             arch: x64
             output_name: teralone_auth-windows-x64
@@ -89,30 +95,21 @@ jobs:
             --output-filename=${{ matrix.output_name }} \
             teralone_auth.py
 
-      # --- Linux Multi-Arch Build (via QEMU) ---
-      - name: Compile (Linux Multi-Arch)
-        if: runner.os == 'Linux' && matrix.arch != 'x86_64'
-        uses: uraimo/run-on-arch-action@v2
-        with:
-          arch: ${{ matrix.arch }}
-          distro: ${{ matrix.arch == 'i386' && 'ubuntu20.04' || 'ubuntu22.04' }}
-          githubToken: ${{ github.token }}
-          setup: |
-            apt-get update
-            apt-get install -y python3 python3-pip patchelf gcc g++ python3-dev
-          run: |
-            python3 -m pip install --upgrade pip
-            pip3 install nuitka zstandard
-            python3 -m nuitka \
-              --onefile \
-              --standalone \
-              --assume-yes-for-downloads \
-              --lto=yes \
-              --plugin-enable=anti-bloat \
-              --python-flag=no_docstrings \
-              --python-flag=-O \
-              --output-filename=${{ matrix.output_name }} \
-              teralone_auth.py
+      # --- Linux Docker-based Build (i386, ARM64, ARMv7) ---
+      - name: Set up QEMU
+        if: matrix.use_docker && matrix.arch != 'i386'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Compile (Linux Docker)
+        if: matrix.use_docker
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} /bin/bash -c "
+            apt-get update && apt-get install -y python3 python3-pip patchelf gcc g++ python3-dev &&
+            python3 -m pip install --upgrade pip &&
+            pip3 install nuitka zstandard &&
+            python3 -m nuitka --onefile --standalone --assume-yes-for-downloads --lto=yes --plugin-enable=anti-bloat --python-flag=no_docstrings --python-flag=-O --output-filename=${{ matrix.output_name }} teralone_auth.py &&
+            chown \$HOST_UID:\$HOST_GID ${{ matrix.output_name }}
+          "
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
