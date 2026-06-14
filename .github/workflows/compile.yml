@@ -49,7 +49,7 @@ jobs:
             arch: armv7
             output_name: teralone_auth-termux-armv7
             use_termux: true
-            image: termux/termux-docker:armhf
+            image: termux/termux-docker:arm
             platform: linux/arm/v7
           # --- Windows Targets ---
           - os: windows-latest
@@ -141,7 +141,7 @@ jobs:
       - name: Compile (Termux Native)
         if: matrix.use_termux
         run: |
-          docker run --rm --platform ${{ matrix.platform }} -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} /bin/bash -c "
+          docker run --rm --platform ${{ matrix.platform }} -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} sh -c "
             pkg update -y &&
             pkg install -y python clang binutils patchelf termux-elf-cleaner &&
             pip install nuitka ordered-set &&
