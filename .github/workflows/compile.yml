@@ -142,7 +142,8 @@ jobs:
         if: matrix.use_termux
         run: |
           docker run --rm --platform ${{ matrix.platform }} -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} sh -c "
-            pkg update -y &&
+            chmod -R 777 . &&
+            export PIP_BREAK_SYSTEM_PACKAGES=1 &&
             pkg install -y python clang binutils patchelf termux-elf-cleaner &&
             pip install nuitka ordered-set &&
             python -m nuitka --onefile --standalone --clang --onefile-no-compression --jobs=1 --output-filename=${{ matrix.output_name }} teralone_auth.py &&
