@@ -38,6 +38,20 @@ jobs:
             image: ubuntu:22.04
             platform: linux/arm/v7
             extra_flags: "--onefile-no-compression"
+          # --- Termux Native Targets ---
+          - os: ubuntu-latest
+            arch: aarch64
+            output_name: teralone_auth-termux-arm64
+            use_termux: true
+            image: termux/termux-docker:aarch64
+            platform: linux/arm64
+          - os: ubuntu-latest
+            arch: armv7
+            output_name: teralone_auth-termux-armv7
+            use_termux: true
+            image: termux/termux-docker:armhf
+            platform: linux/arm/v7
+          # --- Windows Targets ---
           - os: windows-latest
             arch: x64
             output_name: teralone_auth-windows-x64
@@ -82,13 +96,13 @@ jobs:
 
       # --- Linux x86_64 Build (Native) ---
       - name: Setup Python (Linux x64)
-        if: runner.os == 'Linux' && matrix.arch == 'x86_64'
+        if: runner.os == 'Linux' && matrix.arch == 'x86_64' && !matrix.use_termux
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Compile (Linux x64)
-        if: runner.os == 'Linux' && matrix.arch == 'x86_64'
+        if: runner.os == 'Linux' && matrix.arch == 'x86_64' && !matrix.use_termux
         run: |
           sudo apt-get update && sudo apt-get install -y patchelf gcc g++
           python -m pip install --upgrade pip
@@ -104,12 +118,12 @@ jobs:
             --output-filename=${{ matrix.output_name }} \
             teralone_auth.py
 
-      # --- Linux Docker-based Build (i386, ARM64, ARMv7) ---
+      # --- Linux Docker-based Build (Glibc: i386, ARM64, ARMv7) ---
       - name: Set up QEMU
-        if: matrix.use_docker && matrix.arch != 'i386'
+        if: (matrix.use_docker || matrix.use_termux) && matrix.arch != 'i386'
         uses: docker/setup-qemu-action@v3
 
-      - name: Compile (Linux Docker)
+      - name: Compile (Linux Docker - Glibc)
         if: matrix.use_docker
         run: |
           docker run --rm --platform ${{ matrix.platform }} -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} /bin/bash -c "
@@ -120,6 +134,19 @@ jobs:
             python3 -m pip install --upgrade pip &&
             pip3 install nuitka zstandard &&
             python3 -m nuitka --onefile --standalone --assume-yes-for-downloads --lto=no --jobs=1 --plugin-enable=anti-bloat --python-flag=no_docstrings --python-flag=-O ${{ matrix.extra_flags }} --output-filename=${{ matrix.output_name }} teralone_auth.py &&
+            chown \$HOST_UID:\$HOST_GID ${{ matrix.output_name }}
+          "
+
+      # --- Termux Native Build (Bionic) ---
+      - name: Compile (Termux Native)
+        if: matrix.use_termux
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} -v ${{ github.workspace }}:/work -w /work -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) ${{ matrix.image }} /bin/bash -c "
+            pkg update -y &&
+            pkg install -y python clang binutils patchelf termux-elf-cleaner &&
+            pip install nuitka ordered-set &&
+            python -m nuitka --onefile --standalone --clang --onefile-no-compression --jobs=1 --output-filename=${{ matrix.output_name }} teralone_auth.py &&
+            termux-elf-cleaner ${{ matrix.output_name }} &&
             chown \$HOST_UID:\$HOST_GID ${{ matrix.output_name }}
           "
 
