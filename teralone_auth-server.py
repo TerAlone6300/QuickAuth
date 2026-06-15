@@ -50,6 +50,14 @@ def hash_pw(pw, salt=None):
     return h.hex(), salt
 
 class AuthHandler(http.server.BaseHTTPRequestHandler):
+    def get_client_ip(self):
+        # Priority: Cloudflare Header -> Proxy Header -> Direct Address
+        cf_ip = self.headers.get('CF-Connecting-IP')
+        if cf_ip: return cf_ip
+        forwarded = self.headers.get('X-Forwarded-For')
+        if forwarded: return forwarded.split(',')[0].strip()
+        return self.client_address[0]
+
     def _send_json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -57,7 +65,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
     def do_GET(self):
-        ip = self.client_address[0]
+        ip = self.get_client_ip()
         if is_rate_limited(ip):
             return self._send_json({"success": False, "message": "Rate limit exceeded"}, 429)
 
@@ -71,7 +79,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"message": "Not Found"}, 404)
 
     def do_POST(self):
-        ip = self.client_address[0]
+        ip = self.get_client_ip()
         if is_rate_limited(ip):
             return self._send_json({"success": False, "message": "Rate limit exceeded"}, 429)
 
