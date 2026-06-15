@@ -19,6 +19,11 @@ import urllib.parse
 import urllib.error
 from pathlib import Path
 
+# --- Platform Support ---
+if os.name == 'nt':
+    # Enable ANSI escape sequences on Windows
+    os.system('color')
+
 # --- Terminal Styles ---
 class Style:
     RESET = "\033[0m"
