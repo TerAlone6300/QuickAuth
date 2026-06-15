@@ -249,140 +249,6 @@ class TUI:
                 elif isinstance(key, str) and len(key) == 1:
                     current += key
 
-# --- Sync Logic ---
-def sync_request(url, endpoint, payload):
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(f"{url.rstrip('/')}/{endpoint}", data=data, headers={'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as f:
-            return json.loads(f.read().decode('utf-8'))
-    except Exception as e:
-        return {"success": False, "message": str(e)}
-
-def refresh_session(store):
-    tokens = load_data(TOKEN_FILE)
-    at = tokens.get("at")
-    rt = tokens.get("rt")
-    url = store.get("__sync_url__")
-    
-    if not at or not url: return None
-
-    # 1. Try get Session Token
-    res = sync_request(url, "session", {"at": at})
-    if res.get("success"):
-        tokens["st"] = res["st"]
-        save_data(TOKEN_FILE, tokens)
-        return res["st"]
-    
-    # 2. If AT expired, try refresh AT
-    res = sync_request(url, "refresh", {"rt": rt})
-    if res.get("success"):
-        tokens["at"] = res["at"]
-        tokens["rt"] = res["rt"]
-        save_data(TOKEN_FILE, tokens)
-        # Try session again
-        res = sync_request(url, "session", {"at": res["at"]})
-        if res.get("success"):
-            tokens["st"] = res["st"]
-            save_data(TOKEN_FILE, tokens)
-            return res["st"]
-    
-    return None
-
-def perform_sync(store, force=False):
-    if not store.get("__sync_enabled__"): return store
-    
-    st = refresh_session(store)
-    if not st:
-        print(f" {Style.FAIL}Sync failed: Session expired or invalid. Please re-setup sync.{Style.RESET}")
-        return store
-    
-    url = store.get("__sync_url__")
-    # Prepare data to upload (only accounts, no config)
-    accounts = {k: v for k, v in store.items() if not k.startswith("__")}
-    
-    # On force/initial setup, we definitely send current local accounts to server
-    res = sync_request(url, "sync", {"st": st, "data": accounts})
-    if res.get("success"):
-        # Merge downloaded data into local store
-        if res.get("data"):
-            # Update local with server data (server takes precedence for existing keys, 
-            # but local new keys are already on server now)
-            store.update(res["data"])
-            save_store(store)
-            print(f" {Style.OK}Sync completed! ({len(res['data'])} accounts total){Style.RESET}")
-        return store
-    else:
-        print(f" {Style.FAIL}Sync error: {res.get('message')}{Style.RESET}")
-        return store
-
-def check_user_exists(url, user):
-    try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/check?user={urllib.parse.quote(user)}", timeout=5) as f:
-            resp = json.loads(f.read().decode('utf-8'))
-            return resp.get("exists", False)
-    except:
-        return False
-
-def setup_sync(store):
-    if store.get("__sync_enabled__") is not None:
-        return perform_sync(store) # Sync once on startup
-    
-    while True:
-        TUI.clear()
-        TUI.banner()
-        choice = TUI.menu(["Yes (Enable Sync)", "No (Local Only)"], "Enable Code Sync?")
-        if choice == 1 or choice is None:
-            store["__sync_enabled__"] = False
-            save_store(store)
-            return store
-        
-        url = TUI.get_input(f"{Style.INFO}Server URL (http/https):{Style.RESET}").strip()
-        if not url: continue
-        if not url.startswith(("http://", "https://")):
-            print(f" {Style.FAIL}URL must start with http:// or https://{Style.RESET}")
-            time.sleep(1)
-            continue
-        
-        if url.startswith("http://"):
-            print(f" {Style.FAIL}⚠️ WARNING: YOU ARE USING INSECURE HTTP!{Style.RESET}")
-            print(f" {Style.FAIL}Passwords and TOTP secrets can be intercepted.{Style.RESET}")
-            conf = TUI.get_input(f" {Style.WARN}Proceed anyway? (y/N):{Style.RESET}").lower()
-            if conf != 'y': continue
-        
-        user = TUI.get_input(f"{Style.INFO}Username:{Style.RESET}").strip()
-        if not user: continue
-        
-        exists = check_user_exists(url, user)
-        if exists:
-            pwd = TUI.get_input(f"{Style.INFO}Password:{Style.RESET}", password=True)
-            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "login"})
-        else:
-            print(f" {Style.WARN}User not found. Creating new account...{Style.RESET}")
-            pwd = TUI.get_input(f"{Style.INFO}Create a new password:{Style.RESET}", password=True)
-            pwd_conf = TUI.get_input(f"{Style.INFO}Submit your password:{Style.RESET}", password=True)
-            if pwd != pwd_conf:
-                print(f" {Style.FAIL}Passwords do not match!{Style.RESET}")
-                time.sleep(2)
-                continue
-            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "register"})
-            
-        if res.get("success"):
-            store["__sync_enabled__"] = True
-            store["__sync_url__"] = url
-            store["__sync_user__"] = user
-            save_store(store)
-            
-            # Save tokens
-            save_data(TOKEN_FILE, {"at": res["at"], "rt": res["rt"]})
-            
-            print(f" {Style.OK}Sync configured successfully!{Style.RESET}")
-            time.sleep(1)
-            return perform_sync(store)
-        else:
-            print(f" {Style.FAIL}Error: {res.get('message')}{Style.RESET}")
-            time.sleep(2)
-
     @staticmethod
     def smart_input(prompt_char, commands_dict, history=None):
         # commands_dict is {cmd: [args...]}
@@ -537,6 +403,140 @@ def setup_sync(store):
                                 else: multi_selected.add(selected_idx)
                             else:
                                 return selected_idx
+
+# --- Sync Logic ---
+def sync_request(url, endpoint, payload):
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(f"{url.rstrip('/')}/{endpoint}", data=data, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as f:
+            return json.loads(f.read().decode('utf-8'))
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+def refresh_session(store):
+    tokens = load_data(TOKEN_FILE)
+    at = tokens.get("at")
+    rt = tokens.get("rt")
+    url = store.get("__sync_url__")
+    
+    if not at or not url: return None
+
+    # 1. Try get Session Token
+    res = sync_request(url, "session", {"at": at})
+    if res.get("success"):
+        tokens["st"] = res["st"]
+        save_data(TOKEN_FILE, tokens)
+        return res["st"]
+    
+    # 2. If AT expired, try refresh AT
+    res = sync_request(url, "refresh", {"rt": rt})
+    if res.get("success"):
+        tokens["at"] = res["at"]
+        tokens["rt"] = res["rt"]
+        save_data(TOKEN_FILE, tokens)
+        # Try session again
+        res = sync_request(url, "session", {"at": res["at"]})
+        if res.get("success"):
+            tokens["st"] = res["st"]
+            save_data(TOKEN_FILE, tokens)
+            return res["st"]
+    
+    return None
+
+def perform_sync(store, force=False):
+    if not store.get("__sync_enabled__"): return store
+    
+    st = refresh_session(store)
+    if not st:
+        print(f" {Style.FAIL}Sync failed: Session expired or invalid. Please re-setup sync.{Style.RESET}")
+        return store
+    
+    url = store.get("__sync_url__")
+    # Prepare data to upload (only accounts, no config)
+    accounts = {k: v for k, v in store.items() if not k.startswith("__")}
+    
+    # On force/initial setup, we definitely send current local accounts to server
+    res = sync_request(url, "sync", {"st": st, "data": accounts})
+    if res.get("success"):
+        # Merge downloaded data into local store
+        if res.get("data"):
+            # Update local with server data (server takes precedence for existing keys, 
+            # but local new keys are already on server now)
+            store.update(res["data"])
+            save_store(store)
+            print(f" {Style.OK}Sync completed! ({len(res['data'])} accounts total){Style.RESET}")
+        return store
+    else:
+        print(f" {Style.FAIL}Sync error: {res.get('message')}{Style.RESET}")
+        return store
+
+def check_user_exists(url, user):
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/check?user={urllib.parse.quote(user)}", timeout=5) as f:
+            resp = json.loads(f.read().decode('utf-8'))
+            return resp.get("exists", False)
+    except:
+        return False
+
+def setup_sync(store):
+    if store.get("__sync_enabled__") is not None:
+        return perform_sync(store) # Sync once on startup
+    
+    while True:
+        TUI.clear()
+        TUI.banner()
+        choice = TUI.menu(["Yes (Enable Sync)", "No (Local Only)"], "Enable Code Sync?")
+        if choice == 1 or choice is None:
+            store["__sync_enabled__"] = False
+            save_store(store)
+            return store
+        
+        url = TUI.get_input(f"{Style.INFO}Server URL (http/https):{Style.RESET}").strip()
+        if not url: continue
+        if not url.startswith(("http://", "https://")):
+            print(f" {Style.FAIL}URL must start with http:// or https://{Style.RESET}")
+            time.sleep(1)
+            continue
+        
+        if url.startswith("http://"):
+            print(f" {Style.FAIL}⚠️ WARNING: YOU ARE USING INSECURE HTTP!{Style.RESET}")
+            print(f" {Style.FAIL}Passwords and TOTP secrets can be intercepted.{Style.RESET}")
+            conf = TUI.get_input(f" {Style.WARN}Proceed anyway? (y/N):{Style.RESET}").lower()
+            if conf != 'y': continue
+        
+        user = TUI.get_input(f"{Style.INFO}Username:{Style.RESET}").strip()
+        if not user: continue
+        
+        exists = check_user_exists(url, user)
+        if exists:
+            pwd = TUI.get_input(f"{Style.INFO}Password:{Style.RESET}", password=True)
+            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "login"})
+        else:
+            print(f" {Style.WARN}User not found. Creating new account...{Style.RESET}")
+            pwd = TUI.get_input(f"{Style.INFO}Create a new password:{Style.RESET}", password=True)
+            pwd_conf = TUI.get_input(f"{Style.INFO}Submit your password:{Style.RESET}", password=True)
+            if pwd != pwd_conf:
+                print(f" {Style.FAIL}Passwords do not match!{Style.RESET}")
+                time.sleep(2)
+                continue
+            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "register"})
+            
+        if res.get("success"):
+            store["__sync_enabled__"] = True
+            store["__sync_url__"] = url
+            store["__sync_user__"] = user
+            save_store(store)
+            
+            # Save tokens
+            save_data(TOKEN_FILE, {"at": res["at"], "rt": res["rt"]})
+            
+            print(f" {Style.OK}Sync configured successfully!{Style.RESET}")
+            time.sleep(1)
+            return perform_sync(store)
+        else:
+            print(f" {Style.FAIL}Error: {res.get('message')}{Style.RESET}")
+            time.sleep(2)
 
 # --- Logic Actions ---
 def show_live_otps(store, keys):
