@@ -14,6 +14,23 @@ PORT = 8000
 DATA_FILE = "server_data.json"
 lock = threading.Lock()
 
+# --- Security & Rate Limiting ---
+_v = getattr(sys, 'frozen', False)
+rate_limits = {}
+
+def is_rate_limited(ip):
+    now = time.time()
+    with lock:
+        if ip not in rate_limits:
+            rate_limits[ip] = {"sec": [], "min": []}
+        rate_limits[ip]["sec"] = [t for t in rate_limits[ip]["sec"] if now - t < 1]
+        rate_limits[ip]["min"] = [t for t in rate_limits[ip]["min"] if now - t < 60]
+        if len(rate_limits[ip]["sec"]) >= 5 or len(rate_limits[ip]["min"]) >= 90:
+            return True
+        rate_limits[ip]["sec"].append(now)
+        rate_limits[ip]["min"].append(now)
+        return False
+
 def load_db():
     if _v: sys.exit(1)
     with lock:
