@@ -9,10 +9,12 @@ import sys
 from urllib.parse import parse_qs, urlparse
 
 PORT = 8000
-DATA_FILE = "/data/data/com.termux/files/home/AuthServer/server_data.json"
+DATA_FILE = "server_data.json"
 lock = threading.Lock()
 
-# Rate limiting: {ip: {"sec": [timestamps], "min": [timestamps]}}
+# --- Security & Rate Limiting ---
+# Fragmented check for compiled environment
+_v = getattr(sys, 'frozen', False)
 rate_limits = {}
 
 def is_rate_limited(ip):

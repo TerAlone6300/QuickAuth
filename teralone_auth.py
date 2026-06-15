@@ -23,6 +23,40 @@ from pathlib import Path
 if os.name == 'nt':
     # Enable ANSI escape sequences on Windows
     os.system('color')
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    def win_encrypt(data: bytes) -> bytes:
+        import ctypes
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        data_in = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_ubyte)))
+        data_out = DATA_BLOB()
+        if crypt32.CryptProtectData(ctypes.byref(data_in), "QuickAuthData", None, None, None, 0x01, ctypes.byref(data_out)):
+            try:
+                return ctypes.string_at(data_out.pbData, data_out.cbData)
+            finally:
+                kernel32.LocalFree(data_out.pbData)
+        return data
+
+    def win_decrypt(data: bytes) -> bytes:
+        import ctypes
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        data_in = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_ubyte)))
+        data_out = DATA_BLOB()
+        if crypt32.CryptUnprotectData(ctypes.byref(data_in), None, None, None, None, 0x01, ctypes.byref(data_out)):
+            try:
+                return ctypes.string_at(data_out.pbData, data_out.cbData)
+            finally:
+                kernel32.LocalFree(data_out.pbData)
+        return data
+else:
+    def win_encrypt(data: bytes) -> bytes: return data
+    def win_decrypt(data: bytes) -> bytes: return data
 
 # --- Terminal Styles ---
 class Style:
@@ -64,66 +98,101 @@ class Style:
 IS_COMPILED = getattr(sys, 'frozen', False) or "__compiled__" in globals()
 
 # --- Storage Logic ---
-def get_storage_paths():
-    if IS_COMPILED:
-        base_dir = Path.home() / ".teralone_auth"
-        try:
-            base_dir.mkdir(parents=True, exist_ok=True)
-            return base_dir / "auth.json", base_dir / "config.json", base_dir / "token.json"
-        except Exception:
-            return Path("auth.json"), Path("config.json"), Path("token.json")
-    return Path("auth.json"), Path("auth.json"), Path("auth.json")
+BASE_DIR = Path.home() / ".teralone_auth" if IS_COMPILED else Path(".")
+CONFIG_FILE = BASE_DIR / "config.json"
 
-AUTH_FILE, CONFIG_FILE, TOKEN_FILE = get_storage_paths()
+def get_current_user():
+    if not CONFIG_FILE.exists(): return "user"
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+            return data.get("__current_user__", "user")
+    except: return "user"
+
+def get_storage_paths(user=None):
+    if user is None: user = get_current_user()
+    user_dir = BASE_DIR / user
+    try:
+        user_dir.mkdir(parents=True, exist_ok=True)
+    except: pass
+    return user_dir / "auth.json", CONFIG_FILE, user_dir / "token.json"
+
+AUTH_FILE, _, TOKEN_FILE = get_storage_paths()
 TIME_STEP = 30
 DIGITS = 6
 lock = threading.Lock()
 
-def load_data(file_path):
+def load_data(file_path, decrypt=True):
     if not file_path.exists():
         return {}
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(file_path, "rb") as f:
+            raw = f.read()
+            if decrypt and os.name == 'nt' and raw:
+                try: raw = win_decrypt(raw)
+                except: pass
+            return json.loads(raw.decode("utf-8"))
     except Exception:
         return {}
 
-def save_data(file_path, data):
+def save_data(file_path, data, encrypt=True):
     with lock:
         try:
-            # Create file with 0600 permissions if it doesn't exist
+            if not file_path.parent.exists():
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+            if encrypt and os.name == 'nt':
+                try: content = win_encrypt(content)
+                except: pass
+            
+            # Create file with 0600 permissions
             if not file_path.exists():
                 file_path.touch(mode=0o600)
             else:
                 os.chmod(file_path, 0o600)
             
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            with open(file_path, "wb") as f:
+                f.write(content)
         except Exception as e:
             print(f"{Style.FAIL}Error saving file: {e}{Style.RESET}")
 
 def load_store():
     auth_data = load_data(AUTH_FILE)
-    if AUTH_FILE == CONFIG_FILE:
-        return auth_data
-    
-    config_data = load_data(CONFIG_FILE)
-    # Merge for runtime use, but we'll need to keep track of what goes where
+    config_data = load_data(CONFIG_FILE, decrypt=False)
     full_store = auth_data.copy()
     full_store.update(config_data)
     return full_store
 
 def save_store(store):
-    if AUTH_FILE == CONFIG_FILE:
-        save_data(AUTH_FILE, store)
-        return
-
     # Split: config is keys starting with __, auth is others
     auth_data = {k: v for k, v in store.items() if not k.startswith("__")}
     config_data = {k: v for k, v in store.items() if k.startswith("__")}
     
     save_data(AUTH_FILE, auth_data)
-    save_data(CONFIG_FILE, config_data)
+    save_data(CONFIG_FILE, config_data, encrypt=False)
+
+def migrate_old_data():
+    old_auth = BASE_DIR / "auth.json"
+    old_token = BASE_DIR / "token.json"
+    user_dir = BASE_DIR / "user"
+    if old_auth.exists() and not (user_dir / "auth.json").exists():
+        user_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(old_auth, "rb") as f:
+                data = f.read()
+                with open(user_dir / "auth.json", "wb") as f2:
+                    f2.write(data)
+            if old_token.exists():
+                with open(old_token, "rb") as f:
+                    data = f.read()
+                    with open(user_dir / "token.json", "wb") as f2:
+                        f2.write(data)
+            print(f" {Style.INFO}Migrated data to `user` profile.{Style.RESET}")
+        except Exception as e:
+            print(f" {Style.FAIL}Migration error: {e}{Style.RESET}")
+
+migrate_old_data()
 
 # --- TOTP Logic ---
 def normalize_base32(s: str) -> str:
@@ -627,7 +696,104 @@ def cmd_imp(args, store, tui=False):
     store[name] = secret
     save_store(store)
     print(f" {Style.OK}Saved `{name}` successfully! ✨{Style.RESET}")
+    store = perform_sync(store)
     if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+    return store
+
+def cmd_del(args, store, tui=False):
+    if not args and not tui:
+        print(f" {Style.WARN}Usage: dkey <name>{Style.RESET}")
+        return store
+    name = args[0] if args else TUI.get_input(f"{Style.INFO}Name to delete>{Style.RESET}").strip()
+    if name in store:
+        del store[name]
+        save_store(store)
+        print(f" {Style.OK}Deleted `{name}` successfully!{Style.RESET}")
+        store = perform_sync(store)
+    else:
+        print(f" {Style.FAIL}Key `{name}` not found.{Style.RESET}")
+    if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+    return store
+
+def cmd_edit(args, store, tui=False):
+    if not args and not tui:
+        print(f" {Style.WARN}Usage: ekey <name>{Style.RESET}")
+        return store
+    old_name = args[0] if args else TUI.get_input(f"{Style.INFO}Name to edit>{Style.RESET}").strip()
+    if old_name not in store:
+        print(f" {Style.FAIL}Key `{old_name}` not found.{Style.RESET}")
+        if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+        return store
+    
+    new_name = TUI.get_input(f"{Style.INFO}New name (empty to keep current):{Style.RESET}").strip()
+    new_secret = TUI.get_input(f"{Style.INFO}New secret (empty to keep current):{Style.RESET}").strip()
+    
+    if new_name or new_secret:
+        val = store.pop(old_name)
+        store[new_name or old_name] = new_secret or val
+        save_store(store)
+        print(f" {Style.OK}Updated `{old_name}` successfully!{Style.RESET}")
+        store = perform_sync(store)
+    
+    if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+    return store
+
+def cmd_user(args, store, action):
+    global AUTH_FILE, TOKEN_FILE
+    if action == "auser":
+        name = args[0] if args else TUI.get_input(f"{Style.INFO}New profile name:").strip()
+        if name:
+            store["__current_user__"] = name
+            save_store(store)
+            print(f" {Style.OK}Profile `{name}` created.{Style.RESET}")
+            AUTH_FILE, _, TOKEN_FILE = get_storage_paths(name)
+            return load_store()
+    elif action == "cuser":
+        profiles = sorted([p.name for p in BASE_DIR.iterdir() if p.is_dir() and p.name != "__pycache__"])
+        if not profiles: profiles = ["user"]
+        idx = TUI.menu(profiles, "Select Profile")
+        if idx is not None:
+            name = profiles[idx]
+            store["__current_user__"] = name
+            save_store(store)
+            print(f" {Style.OK}Switched to profile `{name}`.{Style.RESET}")
+            AUTH_FILE, _, TOKEN_FILE = get_storage_paths(name)
+            return load_store()
+    elif action == "duser":
+        curr = get_current_user()
+        name = args[0] if args else TUI.get_input(f"{Style.INFO}Profile to delete:").strip()
+        if name == curr:
+            print(f" {Style.FAIL}Cannot delete current profile.{Style.RESET}")
+        elif name:
+            import shutil
+            shutil.rmtree(BASE_DIR / name, ignore_errors=True)
+            print(f" {Style.OK}Profile `{name}` deleted.{Style.RESET}")
+    return store
+
+def cmd_host(args, store):
+    if not args:
+        print(f" {Style.INFO}Current Host: {Style.BOLD}{store.get('__sync_url__', 'None')}{Style.RESET}")
+    elif args[0] == "change":
+        url = args[1] if len(args) > 1 else TUI.get_input(f"{Style.INFO}New Host URL:").strip()
+        if url:
+            store["__sync_url__"] = url
+            save_store(store)
+            print(f" {Style.OK}Host changed to `{url}`.{Style.RESET}")
+    return store
+
+def cmd_sync_toggle(args, store):
+    if not args:
+        state = "ON" if store.get("__sync_enabled__") else "OFF"
+        print(f" {Style.INFO}Sync is currently {Style.BOLD}{state}{Style.RESET}")
+    elif args[0].lower() == "on":
+        store["__sync_enabled__"] = True
+        save_store(store)
+        print(f" {Style.OK}Sync enabled.{Style.RESET}")
+        return perform_sync(store)
+    elif args[0].lower() == "off":
+        store["__sync_enabled__"] = False
+        save_store(store)
+        print(f" {Style.OK}Sync disabled.{Style.RESET}")
     return store
 
 def cmd_key(args, store):
@@ -660,9 +826,17 @@ def run_command_mode(store):
     while True:
         try:
             # Metadata for suggestions
+            keys = sorted([k for k in store.keys() if not k.startswith("__")])
             cmds = {
                 "imp": ["--once"],
-                "key": ["all", "--loop"] + sorted([k for k in store.keys() if not k.startswith("__")]),
+                "key": ["all", "--loop"] + keys,
+                "dkey": keys,
+                "ekey": keys,
+                "auser": [],
+                "cuser": [],
+                "duser": [],
+                "host": ["change"],
+                "sync": ["on", "off"],
                 "resync": [],
                 "mchange": [],
                 "help": [],
@@ -686,9 +860,14 @@ def run_command_mode(store):
                 store["__mode__"] = '2'
                 save_store(store)
                 print(f" {Style.INFO}Mode changed to TUI. Restarting...{Style.RESET}")
-                return store, True # True means mode changed
+                return store, True
             elif cmd == "imp": store = cmd_imp(args, store)
             elif cmd == "key": cmd_key(args, store)
+            elif cmd == "dkey": store = cmd_del(args, store)
+            elif cmd == "ekey": store = cmd_edit(args, store)
+            elif cmd in ("auser", "cuser", "duser"): store = cmd_user(args, store, cmd)
+            elif cmd == "host": store = cmd_host(args, store)
+            elif cmd == "sync": store = cmd_sync_toggle(args, store)
             elif cmd == "help":
                 print(f"""
  {Style.INFO}Commands:{Style.RESET}
@@ -697,6 +876,14 @@ def run_command_mode(store):
   key all        -> Show all codes
   key <name>     -> Show code for a specific key
   key ... --loop -> Live updating codes
+  dkey <name>    -> Delete a key
+  ekey <name>    -> Edit a key
+  auser <name>   -> Add/switch to a new profile
+  cuser          -> Change profile
+  duser <name>   -> Delete a profile
+  host           -> Show current sync host
+  host change    -> Change sync host
+  sync <on/off>  -> Toggle sync
   resync         -> Synchronize data with server
   mchange        -> Switch to TUI mode
   exit           -> Quit application
@@ -709,7 +896,7 @@ def run_command_mode(store):
 
 def run_tui_mode(store):
     while True:
-        options = ["Show live codes", "Import new key", "Quick OTP (Once)", "Resync", "Mode Change", "Exit"]
+        options = ["Show live codes", "Import new key", "Edit key", "Delete key", "Profile Management", "Sync & Host", "Resync", "Mode Change", "Exit"]
         choice = TUI.menu(options, "Main Menu")
         
         if choice == 0: # Show keys
@@ -723,18 +910,31 @@ def run_tui_mode(store):
             if sel_indices is not None:
                 selected_keys = [keys[i] for i in sel_indices]
                 show_live_otps(store, selected_keys)
-        elif choice == 1: # Import
-            store = cmd_imp([], store, tui=True)
-        elif choice == 2: # Once
-            store = cmd_imp(["--once"], store, tui=True)
-        elif choice == 3: # Resync
+        elif choice == 1: store = cmd_imp([], store, tui=True)
+        elif choice == 2: store = cmd_edit([], store, tui=True)
+        elif choice == 3: store = cmd_del([], store, tui=True)
+        elif choice == 4: # Profile Management
+            p_opts = ["Change Profile (cuser)", "Add Profile (auser)", "Delete Profile (duser)"]
+            p_choice = TUI.menu(p_opts, "Profile Management")
+            if p_choice == 0: store = cmd_user([], store, "cuser")
+            elif p_choice == 1: store = cmd_user([], store, "auser")
+            elif p_choice == 2: store = cmd_user([], store, "duser")
+        elif choice == 5: # Sync & Host
+            s_opts = ["Show Host", "Change Host", "Sync ON", "Sync OFF"]
+            s_choice = TUI.menu(s_opts, "Sync & Host")
+            if s_choice == 0: cmd_host([], store)
+            elif s_choice == 1: store = cmd_host(["change"], store)
+            elif s_choice == 2: store = cmd_sync_toggle(["on"], store)
+            elif s_choice == 3: store = cmd_sync_toggle(["off"], store)
+            if s_choice is not None: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+        elif choice == 6: # Resync
             store = perform_sync(store)
             TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
-        elif choice == 4: # Mode change
+        elif choice == 7: # Mode change
             store["__mode__"] = '1'
             save_store(store)
             return store, True
-        elif choice == 5 or choice is None:
+        elif choice == 8 or choice is None:
             TUI.clear()
             TUI.banner()
             print(f" {Style.OK}Goodbye! 👋{Style.RESET}")
