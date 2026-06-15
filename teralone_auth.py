@@ -505,25 +505,39 @@ def refresh_session(store):
     tokens = load_data(TOKEN_FILE)
     at = tokens.get("at")
     rt = tokens.get("rt")
+    exp = tokens.get("exp", 0)
     url = store.get("__sync_url__")
     
     if not at or not url: return None
 
-    # 1. Try get Session Token
+    # 1. Check if AT is locally expired or close to (e.g., within 5 mins)
+    if time.time() > exp - 300:
+        # Try refresh AT
+        res = sync_request(url, "refresh", {"rt": rt})
+        if res.get("success"):
+            tokens["at"] = res["at"]
+            tokens["rt"] = res["rt"]
+            tokens["exp"] = res["exp"]
+            save_data(TOKEN_FILE, tokens)
+            at = res["at"]
+        else:
+            return None
+
+    # 2. Get Session Token
     res = sync_request(url, "session", {"at": at})
     if res.get("success"):
         tokens["st"] = res["st"]
         save_data(TOKEN_FILE, tokens)
         return res["st"]
     
-    # 2. If AT expired, try refresh AT
+    # 3. If session failed (maybe server DB wiped), try one last refresh
     res = sync_request(url, "refresh", {"rt": rt})
     if res.get("success"):
         tokens["at"] = res["at"]
         tokens["rt"] = res["rt"]
+        tokens["exp"] = res["exp"]
         save_data(TOKEN_FILE, tokens)
-        # Try session again
-        res = sync_request(url, "session", {"at": res["at"]})
+        res = sync_request(url, "session", {"at": tokens["at"]})
         if res.get("success"):
             tokens["st"] = res["st"]
             save_data(TOKEN_FILE, tokens)
@@ -551,6 +565,7 @@ def perform_sync(store, force=False):
             # Update local with server data (server takes precedence for existing keys, 
             # but local new keys are already on server now)
             store.update(res["data"])
+            store["__last_sync__"] = int(time.time())
             save_store(store)
             print(f" {Style.OK}Sync completed! ({len(res['data'])} accounts total){Style.RESET}")
         return store
@@ -616,7 +631,7 @@ def setup_sync(store):
             save_store(store)
             
             # Save tokens
-            save_data(TOKEN_FILE, {"at": res["at"], "rt": res["rt"]})
+            save_data(TOKEN_FILE, {"at": res["at"], "rt": res["rt"], "exp": res["exp"]})
             
             print(f" {Style.OK}Sync configured successfully!{Style.RESET}")
             time.sleep(1)
@@ -747,7 +762,8 @@ def cmd_user(args, store, action):
             save_store(store)
             print(f" {Style.OK}Profile `{name}` created.{Style.RESET}")
             AUTH_FILE, _, TOKEN_FILE = get_storage_paths(name)
-            return load_store()
+            new_store = load_store()
+            return setup_sync(new_store)
     elif action == "cuser":
         profiles = sorted([p.name for p in BASE_DIR.iterdir() if p.is_dir() and p.name != "__pycache__"])
         if not profiles: profiles = ["user"]
@@ -758,7 +774,8 @@ def cmd_user(args, store, action):
             save_store(store)
             print(f" {Style.OK}Switched to profile `{name}`.{Style.RESET}")
             AUTH_FILE, _, TOKEN_FILE = get_storage_paths(name)
-            return load_store()
+            new_store = load_store()
+            return setup_sync(new_store)
     elif action == "duser":
         curr = get_current_user()
         name = args[0] if args else TUI.get_input(f"{Style.INFO}Profile to delete:").strip()
@@ -817,6 +834,37 @@ def cmd_key(args, store):
             print(f" {Style.BOLD}{n:15}{Style.RESET}: {Style.OK}{code}{Style.RESET} ({rem}s)")
 
 # --- Main Loops ---
+def cmd_passwd(store, tui=False):
+    if not store.get("__sync_enabled__"):
+        print(f" {Style.FAIL}Sync is not enabled for this profile.{Style.RESET}")
+        if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+        return
+    
+    url = store.get("__sync_url__")
+    user = store.get("__sync_user__")
+    
+    old_pw = TUI.get_input(f"{Style.INFO}Current Password:{Style.RESET}", password=True)
+    new_pw = TUI.get_input(f"{Style.INFO}New Password:{Style.RESET}", password=True)
+    new_pw_conf = TUI.get_input(f"{Style.INFO}Confirm New Password:{Style.RESET}", password=True)
+    
+    if new_pw != new_pw_conf:
+        print(f" {Style.FAIL}New passwords do not match!{Style.RESET}")
+        if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+        return
+    
+    res = sync_request(url, "passwd", {"user": user, "old_pass": old_pw, "new_pass": new_pw})
+    if res.get("success"):
+        print(f" {Style.OK}Password updated successfully!{Style.RESET}")
+        print(f" {Style.WARN}Please re-login to update tokens.{Style.RESET}")
+        # Clear local tokens to force re-login
+        save_data(TOKEN_FILE, {})
+        if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+        return setup_sync(store)
+    else:
+        print(f" {Style.FAIL}Error: {res.get('message')}{Style.RESET}")
+    
+    if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+
 def run_command_mode(store):
     TUI.clear()
     TUI.banner()
@@ -837,6 +885,7 @@ def run_command_mode(store):
                 "duser": [],
                 "host": ["change"],
                 "sync": ["on", "off"],
+                "passwd": [],
                 "resync": [],
                 "mchange": [],
                 "help": [],
@@ -868,6 +917,7 @@ def run_command_mode(store):
             elif cmd in ("auser", "cuser", "duser"): store = cmd_user(args, store, cmd)
             elif cmd == "host": store = cmd_host(args, store)
             elif cmd == "sync": store = cmd_sync_toggle(args, store)
+            elif cmd == "passwd": store = cmd_passwd(store) or store
             elif cmd == "help":
                 print(f"""
  {Style.INFO}Commands:{Style.RESET}
@@ -884,6 +934,7 @@ def run_command_mode(store):
   host           -> Show current sync host
   host change    -> Change sync host
   sync <on/off>  -> Toggle sync
+  passwd         -> Change sync password
   resync         -> Synchronize data with server
   mchange        -> Switch to TUI mode
   exit           -> Quit application
@@ -920,12 +971,13 @@ def run_tui_mode(store):
             elif p_choice == 1: store = cmd_user([], store, "auser")
             elif p_choice == 2: store = cmd_user([], store, "duser")
         elif choice == 5: # Sync & Host
-            s_opts = ["Show Host", "Change Host", "Sync ON", "Sync OFF"]
+            s_opts = ["Show Host", "Change Host", "Sync ON", "Sync OFF", "Change Sync Password (passwd)"]
             s_choice = TUI.menu(s_opts, "Sync & Host")
             if s_choice == 0: cmd_host([], store)
             elif s_choice == 1: store = cmd_host(["change"], store)
             elif s_choice == 2: store = cmd_sync_toggle(["on"], store)
             elif s_choice == 3: store = cmd_sync_toggle(["off"], store)
+            elif s_choice == 4: store = cmd_passwd(store, tui=True) or store
             if s_choice is not None: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
         elif choice == 6: # Resync
             store = perform_sync(store)

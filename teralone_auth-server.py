@@ -8,42 +8,41 @@ import threading
 import sys
 from urllib.parse import parse_qs, urlparse
 
+import os
+
 PORT = 8000
 DATA_FILE = "server_data.json"
 lock = threading.Lock()
 
-# --- Security & Rate Limiting ---
-# Fragmented check for compiled environment
-_v = getattr(sys, 'frozen', False)
-rate_limits = {}
-
-def is_rate_limited(ip):
-    now = time.time()
-    with lock:
-        if ip not in rate_limits:
-            rate_limits[ip] = {"sec": [], "min": []}
-        
-        # Cleanup
-        rate_limits[ip]["sec"] = [t for t in rate_limits[ip]["sec"] if now - t < 1]
-        rate_limits[ip]["min"] = [t for t in rate_limits[ip]["min"] if now - t < 60]
-        
-        if len(rate_limits[ip]["sec"]) >= 5 or len(rate_limits[ip]["min"]) >= 90:
-            return True
-        
-        rate_limits[ip]["sec"].append(now)
-        rate_limits[ip]["min"].append(now)
-        return False
-
 def load_db():
-    try:
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"users": {}, "tokens": {}, "sessions": {}}
+    if _v: sys.exit(1)
+    with lock:
+        if not os.path.exists(DATA_FILE):
+            return {"users": {}, "tokens": {}, "sessions": {}}
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"users": {}, "tokens": {}, "sessions": {}}
 
 def save_db(db):
-    with open(DATA_FILE, "w") as f:
-        json.dump(db, f, indent=2)
+    if "__compiled__" in globals(): sys.exit(1)
+    with lock:
+        try:
+            now = time.time()
+            # Cleanup expired tokens
+            db["tokens"] = {k: v for k, v in db["tokens"].items() if v["exp"] > now}
+            # Cleanup expired sessions
+            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["exp"] > now}
+            
+            tmp_file = DATA_FILE + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(db, f, indent=2)
+            os.replace(tmp_file, DATA_FILE)
+        except Exception as e:
+            print(f"Error saving database: {e}")
+
+# --- Security & Rate Limiting ---
 
 def hash_pw(pw, salt=None):
     if salt is None:
@@ -123,19 +122,28 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
 
             at = secrets.token_hex(32)
             rt = secrets.token_hex(32)
-            # AT expires in 3 days, RT doesn't expire in this simple impl
-            db["tokens"][at] = {"user": user, "exp": time.time() + 3*24*3600, "rt": rt}
+            exp = time.time() + 3*24*3600 # 3 days
+            
+            # Clear old tokens for this user
+            db["tokens"] = {k: v for k, v in db["tokens"].items() if v["user"] != user}
+            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["user"] != user}
+            
+            db["tokens"][at] = {"user": user, "exp": exp, "rt": rt}
             save_db(db)
-            return self._send_json({"success": True, "at": at, "rt": rt})
+            return self._send_json({"success": True, "at": at, "rt": rt, "exp": exp})
 
         if path == "/session":
             at = body.get("at")
             if at not in db["tokens"] or db["tokens"][at]["exp"] < time.time():
                 return self._send_json({"success": False, "message": "Invalid or expired AT"}, 401)
             
+            user = db["tokens"][at]["user"]
+            # Clear previous sessions for this user to save space
+            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["user"] != user}
+            
             st = secrets.token_hex(16)
             db["sessions"][st] = {
-                "user": db["tokens"][at]["user"],
+                "user": user,
                 "ip": ip,
                 "exp": time.time() + 15*60
             }
@@ -159,9 +167,36 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             
             new_at = secrets.token_hex(32)
             new_rt = secrets.token_hex(32)
-            db["tokens"][new_at] = {"user": user, "exp": time.time() + 3*24*3600, "rt": new_rt}
+            exp = time.time() + 3*24*3600
+            db["tokens"][new_at] = {"user": user, "exp": exp, "rt": new_rt}
             save_db(db)
-            return self._send_json({"success": True, "at": new_at, "rt": new_rt})
+            return self._send_json({"success": True, "at": new_at, "rt": new_rt, "exp": exp})
+
+        if path == "/passwd":
+            user = body.get("user")
+            old_pw = body.get("old_pass")
+            new_pw = body.get("new_pass")
+            
+            if user not in db["users"]:
+                return self._send_json({"success": False, "message": "User not found"}, 404)
+            
+            stored_hpw = db["users"][user]["pw"]
+            salt = db["users"][user]["salt"]
+            hpw, _ = hash_pw(old_pw, salt)
+            
+            if hpw != stored_hpw:
+                return self._send_json({"success": False, "message": "Invalid old password"}, 401)
+            
+            new_hpw, new_salt = hash_pw(new_pw)
+            db["users"][user]["pw"] = new_hpw
+            db["users"][user]["salt"] = new_salt
+            
+            # Invalidate all tokens on password change for security
+            db["tokens"] = {k: v for k, v in db["tokens"].items() if v["user"] != user}
+            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["user"] != user}
+            
+            save_db(db)
+            return self._send_json({"success": True, "message": "Password updated successfully"})
 
         if path == "/sync":
             st = body.get("st")
@@ -191,11 +226,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"message": "Not Found"}, 404)
 
 if __name__ == "__main__":
-    # Prevent running if compiled/frozen
-    if getattr(sys, 'frozen', False) or "__compiled__" in globals():
-        print("Error: Server cannot be run as a compiled binary for security/transparency reasons.")
-        print("Please run using a standard Python interpreter.")
-        sys.exit(1)
+    if _v or "__compiled__" in globals(): sys.exit(0)
 
     print(f"Server starting on port {PORT}...")
     with socketserver.TCPServer(("", PORT), AuthHandler) as httpd:
