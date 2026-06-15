@@ -16,6 +16,7 @@ import os
 import select
 import urllib.request
 import urllib.parse
+import urllib.error
 from pathlib import Path
 
 # --- Terminal Styles ---
@@ -411,6 +412,12 @@ def sync_request(url, endpoint, payload):
     try:
         with urllib.request.urlopen(req, timeout=10) as f:
             return json.loads(f.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        try:
+            # Try to read the JSON error body from the server
+            return json.loads(e.read().decode('utf-8'))
+        except:
+            return {"success": False, "message": f"HTTP Error {e.code}"}
     except Exception as e:
         return {"success": False, "message": str(e)}
 

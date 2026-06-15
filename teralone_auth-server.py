@@ -81,7 +81,8 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         except:
             return self._send_json({"success": False, "message": "Invalid JSON"}, 400)
 
-        path = self.path.rstrip('/')
+        # Normalize path
+        path = urlparse(self.path).path.rstrip('/')
         db = load_db()
 
         if path == "/auth":
