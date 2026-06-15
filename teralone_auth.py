@@ -947,7 +947,7 @@ def run_command_mode(store):
 
 def run_tui_mode(store):
     while True:
-        options = ["Show live codes", "Import new key", "Edit key", "Delete key", "Profile Management", "Sync & Host", "Resync", "Mode Change", "Exit"]
+        options = ["Show live codes", "Import new key", "Edit key", "Delete key", "Profile Management", "Sync & Host", "Change Password", "Resync", "Mode Change", "Exit"]
         choice = TUI.menu(options, "Main Menu")
         
         if choice == 0: # Show keys
@@ -971,22 +971,23 @@ def run_tui_mode(store):
             elif p_choice == 1: store = cmd_user([], store, "auser")
             elif p_choice == 2: store = cmd_user([], store, "duser")
         elif choice == 5: # Sync & Host
-            s_opts = ["Show Host", "Change Host", "Sync ON", "Sync OFF", "Change Sync Password (passwd)"]
+            s_opts = ["Show Host", "Change Host", "Sync ON", "Sync OFF"]
             s_choice = TUI.menu(s_opts, "Sync & Host")
             if s_choice == 0: cmd_host([], store)
             elif s_choice == 1: store = cmd_host(["change"], store)
             elif s_choice == 2: store = cmd_sync_toggle(["on"], store)
             elif s_choice == 3: store = cmd_sync_toggle(["off"], store)
-            elif s_choice == 4: store = cmd_passwd(store, tui=True) or store
             if s_choice is not None: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
-        elif choice == 6: # Resync
+        elif choice == 6: # Password
+            store = cmd_passwd(store, tui=True) or store
+        elif choice == 7: # Resync
             store = perform_sync(store)
             TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
-        elif choice == 7: # Mode change
+        elif choice == 8: # Mode change
             store["__mode__"] = '1'
             save_store(store)
             return store, True
-        elif choice == 8 or choice is None:
+        elif choice == 9 or choice is None:
             TUI.clear()
             TUI.banner()
             print(f" {Style.OK}Goodbye! 👋{Style.RESET}")
