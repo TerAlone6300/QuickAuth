@@ -14,6 +14,8 @@ import threading
 import sys
 import os
 import select
+import urllib.request
+import urllib.parse
 from pathlib import Path
 
 # --- Terminal Styles ---
@@ -52,19 +54,21 @@ class Style:
     INFO = f"{BOLD}{CYAN}"
     HL = f"{REVERSE}{CYAN}" # Highlight for menu
 
+# --- Environment Detection ---
+IS_COMPILED = getattr(sys, 'frozen', False) or "__compiled__" in globals()
+
 # --- Storage Logic ---
 def get_storage_paths():
-    is_native = getattr(sys, 'frozen', False)
-    if is_native:
+    if IS_COMPILED:
         base_dir = Path.home() / ".teralone_auth"
         try:
             base_dir.mkdir(parents=True, exist_ok=True)
-            return base_dir / "auth.json", base_dir / "config.json"
+            return base_dir / "auth.json", base_dir / "config.json", base_dir / "token.json"
         except Exception:
-            return Path("auth.json"), Path("config.json")
-    return Path("auth.json"), Path("auth.json")
+            return Path("auth.json"), Path("config.json"), Path("token.json")
+    return Path("auth.json"), Path("auth.json"), Path("auth.json")
 
-AUTH_FILE, CONFIG_FILE = get_storage_paths()
+AUTH_FILE, CONFIG_FILE, TOKEN_FILE = get_storage_paths()
 TIME_STEP = 30
 DIGITS = 6
 lock = threading.Lock()
@@ -81,6 +85,12 @@ def load_data(file_path):
 def save_data(file_path, data):
     with lock:
         try:
+            # Create file with 0600 permissions if it doesn't exist
+            if not file_path.exists():
+                file_path.touch(mode=0o600)
+            else:
+                os.chmod(file_path, 0o600)
+            
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -204,7 +214,7 @@ def parse_mouse_sgr(data):
 class TUI:
     @staticmethod
     def banner():
-        env_type = "Native" if getattr(sys, 'frozen', False) else "Python VM"
+        env_type = "Native" if IS_COMPILED else "Python VM"
         print(f" {Style.HEADER}✨ TerAlone's Auth ✨{Style.RESET}", end="\r\n")
         print(f" {Style.DIM}---------------------{Style.RESET}", end="\r\n")
         print(f" Environment: {Style.INFO}{env_type}{Style.RESET}", end="\r\n")
@@ -213,6 +223,165 @@ class TUI:
     def clear():
         sys.stdout.write("\033[H\033[2J")
         sys.stdout.flush()
+
+    @staticmethod
+    def get_input(prompt, password=False):
+        current = ""
+        with RawTerminal() as rt:
+            while True:
+                sys.stdout.write(f"\r\x1b[K {prompt} ")
+                if password:
+                    sys.stdout.write("*" * len(current))
+                else:
+                    sys.stdout.write(current)
+                sys.stdout.flush()
+                
+                key = rt.get_key()
+                if key == "ENTER":
+                    sys.stdout.write("\r\n")
+                    sys.stdout.flush()
+                    return current
+                elif key == "BACKSPACE":
+                    current = current[:-1]
+                elif key == "CTRL_C":
+                    sys.stdout.write("\r\n")
+                    raise KeyboardInterrupt
+                elif isinstance(key, str) and len(key) == 1:
+                    current += key
+
+# --- Sync Logic ---
+def sync_request(url, endpoint, payload):
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(f"{url.rstrip('/')}/{endpoint}", data=data, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as f:
+            return json.loads(f.read().decode('utf-8'))
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+def refresh_session(store):
+    tokens = load_data(TOKEN_FILE)
+    at = tokens.get("at")
+    rt = tokens.get("rt")
+    url = store.get("__sync_url__")
+    
+    if not at or not url: return None
+
+    # 1. Try get Session Token
+    res = sync_request(url, "session", {"at": at})
+    if res.get("success"):
+        tokens["st"] = res["st"]
+        save_data(TOKEN_FILE, tokens)
+        return res["st"]
+    
+    # 2. If AT expired, try refresh AT
+    res = sync_request(url, "refresh", {"rt": rt})
+    if res.get("success"):
+        tokens["at"] = res["at"]
+        tokens["rt"] = res["rt"]
+        save_data(TOKEN_FILE, tokens)
+        # Try session again
+        res = sync_request(url, "session", {"at": res["at"]})
+        if res.get("success"):
+            tokens["st"] = res["st"]
+            save_data(TOKEN_FILE, tokens)
+            return res["st"]
+    
+    return None
+
+def perform_sync(store, force=False):
+    if not store.get("__sync_enabled__"): return store
+    
+    st = refresh_session(store)
+    if not st:
+        print(f" {Style.FAIL}Sync failed: Session expired or invalid. Please re-setup sync.{Style.RESET}")
+        return store
+    
+    url = store.get("__sync_url__")
+    # Prepare data to upload (only accounts, no config)
+    accounts = {k: v for k, v in store.items() if not k.startswith("__")}
+    
+    # On force/initial setup, we definitely send current local accounts to server
+    res = sync_request(url, "sync", {"st": st, "data": accounts})
+    if res.get("success"):
+        # Merge downloaded data into local store
+        if res.get("data"):
+            # Update local with server data (server takes precedence for existing keys, 
+            # but local new keys are already on server now)
+            store.update(res["data"])
+            save_store(store)
+            print(f" {Style.OK}Sync completed! ({len(res['data'])} accounts total){Style.RESET}")
+        return store
+    else:
+        print(f" {Style.FAIL}Sync error: {res.get('message')}{Style.RESET}")
+        return store
+
+def check_user_exists(url, user):
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/check?user={urllib.parse.quote(user)}", timeout=5) as f:
+            resp = json.loads(f.read().decode('utf-8'))
+            return resp.get("exists", False)
+    except:
+        return False
+
+def setup_sync(store):
+    if store.get("__sync_enabled__") is not None:
+        return perform_sync(store) # Sync once on startup
+    
+    while True:
+        TUI.clear()
+        TUI.banner()
+        choice = TUI.menu(["Yes (Enable Sync)", "No (Local Only)"], "Enable Code Sync?")
+        if choice == 1 or choice is None:
+            store["__sync_enabled__"] = False
+            save_store(store)
+            return store
+        
+        url = TUI.get_input(f"{Style.INFO}Server URL (http/https):{Style.RESET}").strip()
+        if not url: continue
+        if not url.startswith(("http://", "https://")):
+            print(f" {Style.FAIL}URL must start with http:// or https://{Style.RESET}")
+            time.sleep(1)
+            continue
+        
+        if url.startswith("http://"):
+            print(f" {Style.FAIL}⚠️ WARNING: YOU ARE USING INSECURE HTTP!{Style.RESET}")
+            print(f" {Style.FAIL}Passwords and TOTP secrets can be intercepted.{Style.RESET}")
+            conf = TUI.get_input(f" {Style.WARN}Proceed anyway? (y/N):{Style.RESET}").lower()
+            if conf != 'y': continue
+        
+        user = TUI.get_input(f"{Style.INFO}Username:{Style.RESET}").strip()
+        if not user: continue
+        
+        exists = check_user_exists(url, user)
+        if exists:
+            pwd = TUI.get_input(f"{Style.INFO}Password:{Style.RESET}", password=True)
+            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "login"})
+        else:
+            print(f" {Style.WARN}User not found. Creating new account...{Style.RESET}")
+            pwd = TUI.get_input(f"{Style.INFO}Create a new password:{Style.RESET}", password=True)
+            pwd_conf = TUI.get_input(f"{Style.INFO}Submit your password:{Style.RESET}", password=True)
+            if pwd != pwd_conf:
+                print(f" {Style.FAIL}Passwords do not match!{Style.RESET}")
+                time.sleep(2)
+                continue
+            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "register"})
+            
+        if res.get("success"):
+            store["__sync_enabled__"] = True
+            store["__sync_url__"] = url
+            store["__sync_user__"] = user
+            save_store(store)
+            
+            # Save tokens
+            save_data(TOKEN_FILE, {"at": res["at"], "rt": res["rt"]})
+            
+            print(f" {Style.OK}Sync configured successfully!{Style.RESET}")
+            time.sleep(1)
+            return perform_sync(store)
+        else:
+            print(f" {Style.FAIL}Error: {res.get('message')}{Style.RESET}")
+            time.sleep(2)
 
     @staticmethod
     def smart_input(prompt_char, commands_dict, history=None):
@@ -271,7 +440,7 @@ class TUI:
 
                 key = rt.get_key()
                 if key == "ENTER":
-                    sys.stdout.write("\n\x1b[K\n")
+                    sys.stdout.write("\r\n\x1b[K\r\n")
                     sys.stdout.flush()
                     return current
                 elif key == "BACKSPACE":
@@ -416,31 +585,31 @@ def cmd_imp(args, store, tui=False):
         if tui:
             TUI.clear()
             TUI.banner()
-        secret = input(f" {Style.INFO}Secret Key> {Style.RESET}").strip()
+        secret = TUI.get_input(f"{Style.INFO}Secret Key>{Style.RESET}").strip()
         if not secret: return store
         try:
             secret_bytes = decode_secret(secret)
             code, rem = totp_code(secret_bytes)
             print(f" {Style.OK}OTP Code: {code}{Style.RESET} (expires in {rem}s)")
-            if tui: input(f"\n {Style.DIM}Press Enter to continue...{Style.RESET}")
+            if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
         except Exception as e:
             print(f" {Style.FAIL}Error: {e}{Style.RESET}")
-            if tui: input(f"\n {Style.DIM}Press Enter to continue...{Style.RESET}")
+            if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
         return store
 
     if tui:
         TUI.clear()
         TUI.banner()
-    secret = input(f" {Style.INFO}Secret Key> {Style.RESET}").strip()
-    name = input(f" {Style.INFO}Name/Account> {Style.RESET}").strip()
+    secret = TUI.get_input(f"{Style.INFO}Secret Key>{Style.RESET}").strip()
+    name = TUI.get_input(f"{Style.INFO}Name/Account>{Style.RESET}").strip()
     if not name:
         print(f" {Style.FAIL}Name cannot be empty.{Style.RESET}")
-        if tui: input(f"\n {Style.DIM}Press Enter to continue...{Style.RESET}")
+        if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
         return store
     store[name] = secret
     save_store(store)
     print(f" {Style.OK}Saved `{name}` successfully! ✨{Style.RESET}")
-    if tui: input(f"\n {Style.DIM}Press Enter to continue...{Style.RESET}")
+    if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
     return store
 
 def cmd_key(args, store):
@@ -476,6 +645,7 @@ def run_command_mode(store):
             cmds = {
                 "imp": ["--once"],
                 "key": ["all", "--loop"] + sorted([k for k in store.keys() if not k.startswith("__")]),
+                "resync": [],
                 "mchange": [],
                 "help": [],
                 "exit": [],
@@ -492,6 +662,8 @@ def run_command_mode(store):
             if cmd in ("exit", "quit"):
                 print(f" {Style.OK}Goodbye! 👋{Style.RESET}")
                 sys.exit(0)
+            elif cmd == "resync":
+                store = perform_sync(store)
             elif cmd == "mchange":
                 store["__mode__"] = '2'
                 save_store(store)
@@ -507,6 +679,7 @@ def run_command_mode(store):
   key all        -> Show all codes
   key <name>     -> Show code for a specific key
   key ... --loop -> Live updating codes
+  resync         -> Synchronize data with server
   mchange        -> Switch to TUI mode
   exit           -> Quit application
 """)
@@ -518,7 +691,7 @@ def run_command_mode(store):
 
 def run_tui_mode(store):
     while True:
-        options = ["Show live codes", "Import new key", "Quick OTP (Once)", "Mode Change", "Exit"]
+        options = ["Show live codes", "Import new key", "Quick OTP (Once)", "Resync", "Mode Change", "Exit"]
         choice = TUI.menu(options, "Main Menu")
         
         if choice == 0: # Show keys
@@ -526,7 +699,7 @@ def run_tui_mode(store):
             if not keys:
                 TUI.clear()
                 TUI.banner()
-                input(f" {Style.WARN}No keys found. Press Enter...{Style.RESET}")
+                TUI.get_input(f"{Style.WARN}No keys found. Press Enter...{Style.RESET}")
                 continue
             sel_indices = TUI.menu(keys, "Select keys (Space to multi-select)", multi=True)
             if sel_indices is not None:
@@ -536,11 +709,14 @@ def run_tui_mode(store):
             store = cmd_imp([], store, tui=True)
         elif choice == 2: # Once
             store = cmd_imp(["--once"], store, tui=True)
-        elif choice == 3: # Mode change
+        elif choice == 3: # Resync
+            store = perform_sync(store)
+            TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
+        elif choice == 4: # Mode change
             store["__mode__"] = '1'
             save_store(store)
             return store, True
-        elif choice == 4 or choice is None:
+        elif choice == 5 or choice is None:
             TUI.clear()
             TUI.banner()
             print(f" {Style.OK}Goodbye! 👋{Style.RESET}")
@@ -549,6 +725,7 @@ def run_tui_mode(store):
 
 def main():
     store = load_store()
+    store = setup_sync(store)
     mode = store.get("__mode__")
     
     while True:
