@@ -9,9 +9,11 @@ import sys
 from urllib.parse import parse_qs, urlparse
 
 import os
+from pathlib import Path
 
 PORT = 8000
-DATA_FILE = "server_data.json"
+# Dữ liệu server sẽ lưu cùng thư mục với script hoặc theo biến môi trường
+DATA_FILE = os.getenv("AUTH_SERVER_DATA", str(Path(__file__).parent / "server_data.json"))
 lock = threading.Lock()
 
 # --- Security & Rate Limiting ---
