@@ -408,13 +408,17 @@ class TUI:
 # --- Sync Logic ---
 def sync_request(url, endpoint, payload):
     data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(f"{url.rstrip('/')}/{endpoint}", data=data, headers={'Content-Type': 'application/json'})
+    parsed_url = urllib.parse.urlparse(url)
+    headers = {
+        'Content-Type': 'application/json',
+        'Host': parsed_url.netloc
+    }
+    req = urllib.request.Request(f"{url.rstrip('/')}/{endpoint}", data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10) as f:
             return json.loads(f.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         try:
-            # Try to read the JSON error body from the server
             return json.loads(e.read().decode('utf-8'))
         except:
             return {"success": False, "message": f"HTTP Error {e.code}"}
