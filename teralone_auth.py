@@ -411,8 +411,10 @@ def sync_request(url, endpoint, payload):
     parsed_url = urllib.parse.urlparse(url)
     headers = {
         'Content-Type': 'application/json',
-        'Host': parsed_url.netloc
+        'Host': parsed_url.netloc,
+        'User-Agent': 'TerAloneClient/1.0'
     }
+    
     req = urllib.request.Request(f"{url.rstrip('/')}/{endpoint}", data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10) as f:
@@ -484,9 +486,9 @@ def perform_sync(store, force=False):
 
 def check_user_exists(url, user):
     try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/check?user={urllib.parse.quote(user)}", timeout=5) as f:
-            resp = json.loads(f.read().decode('utf-8'))
-            return resp.get("exists", False)
+        # Use sync_request (POST) for check_user_exists to bypass GET restrictions
+        res = sync_request(url, "check", {"user": user})
+        return res.get("exists", False)
     except:
         return False
 

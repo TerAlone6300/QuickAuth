@@ -9,7 +9,7 @@ import sys
 from urllib.parse import parse_qs, urlparse
 
 PORT = 8000
-DATA_FILE = "server_data.json"
+DATA_FILE = "/data/data/com.termux/files/home/AuthServer/server_data.json"
 lock = threading.Lock()
 
 # Rate limiting: {ip: {"sec": [timestamps], "min": [timestamps]}}
@@ -53,10 +53,14 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
     def get_client_ip(self):
         # Priority: Cloudflare Header -> Proxy Header -> Direct Address
         cf_ip = self.headers.get('CF-Connecting-IP')
-        if cf_ip: return cf_ip
         forwarded = self.headers.get('X-Forwarded-For')
-        if forwarded: return forwarded.split(',')[0].strip()
-        return self.client_address[0]
+        
+        if cf_ip:
+            return cf_ip
+        elif forwarded:
+            return forwarded.split(',')[0].strip()
+        else:
+            return self.client_address[0]
 
     def _send_json(self, data, status=200):
         self.send_response(status)
@@ -71,10 +75,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
 
         parsed_path = urlparse(self.path)
         if parsed_path.path == "/check":
-            query = parse_qs(parsed_path.query)
-            user = query.get("user", [None])[0]
-            db = load_db()
-            return self._send_json({"exists": user in db["users"]})
+            return self._send_json({"success": False, "message": "Method Not Allowed. Use POST."}, 405)
         
         self._send_json({"message": "Not Found"}, 404)
 
@@ -92,6 +93,10 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         # Normalize path
         path = urlparse(self.path).path.rstrip('/')
         db = load_db()
+
+        if path == "/check":
+            user = body.get("user")
+            return self._send_json({"exists": user in db["users"]})
 
         if path == "/auth":
             user = body.get("user")
