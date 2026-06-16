@@ -190,13 +190,9 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             rt, env = body.get("rt"), body.get("env", "Unknown")
             c.execute("SELECT user, ip FROM tokens WHERE rt=?", (rt,))
             row = c.fetchone()
-            if not row or not is_same_network(row[1], ip):
-                if row:
-                    c.execute("DELETE FROM tokens WHERE user=?", (row[0],))
-                    c.execute("DELETE FROM sessions WHERE user=?", (row[0],))
-                    conn.commit()
+            if not row:
                 conn.close()
-                return self._send_json({"success": False, "message": "Invalid RT or IP Mismatch"}, 401)
+                return self._send_json({"success": False, "message": "Invalid RT"}, 401)
             
             user = row[0]
             c.execute("DELETE FROM tokens WHERE rt=?", (rt,))
