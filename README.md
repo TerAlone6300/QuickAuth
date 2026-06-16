@@ -32,7 +32,7 @@ Nếu bạn muốn tự chạy máy chủ đồng bộ riêng:
 ```bash
 python3 teralone_auth-server.py
 ```
-*Lưu ý: Server tích hợp cơ chế tự động dọn dẹp token hết hạn và ghi file nguyên tử (Atomic Write) để chống mất dữ liệu.*
+*Lưu ý: Server hỗ trợ tự động cập nhật bằng cách kiểm tra file `VERSION` từ GitHub mỗi giờ. Nếu phát hiện phiên bản mới, server sẽ tự động tải và cập nhật.*
 
 ### Phiên bản Compile sẵn (Nuitka)
 Nếu bạn tải về phiên bản đã được compile (trong phần [Release](https://github.com/TerAlone6300/QuickAuth/releases/)):

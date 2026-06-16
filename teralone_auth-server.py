@@ -8,21 +8,69 @@ import threading
 import sys
 import sqlite3
 import os
+import urllib.request
+import zipfile
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
 PORT = 8000
 DB_FILE = os.getenv("AUTH_SERVER_DB", str(Path(__file__).parent / "auth_server.db"))
+VERSION_URL = "https://raw.githubusercontent.com/TerAlone6300/QuickAuth/main/SERVER_VERSION"
+ZIP_URL = "https://github.com/TerAlone6300/QuickAuth/archive/refs/heads/main.zip"
 lock = threading.Lock()
 _v = getattr(sys, 'frozen', False)
 
+def perform_update():
+    print("[!] Cập nhật server...")
+    try:
+        # Tải ZIP
+        zip_path = Path(__file__).parent / "update.zip"
+        urllib.request.urlretrieve(ZIP_URL, zip_path)
+        
+        # Giải nén tạm
+        extract_path = Path(__file__).parent / "update_tmp"
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
+        
+        # Ghi đè file code (chỉ file .py)
+        src_dir = extract_path / "QuickAuth-main"
+        for file in src_dir.glob("*.py"):
+            shutil.move(str(file), str(Path(__file__).parent / file.name))
+            
+        # Cập nhật version cục bộ
+        with urllib.request.urlopen(VERSION_URL) as f:
+            new_ver = f.read().decode().strip()
+        with open(Path(__file__).parent / "SERVER_VERSION", "w") as f:
+            f.write(new_ver)
+            
+        # Dọn dẹp
+        shutil.rmtree(extract_path)
+        os.remove(zip_path)
+        
+        print("[!] Cập nhật thành công. Đang khởi động lại...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        print(f"[!] Lỗi cập nhật: {e}")
+
+def check_for_updates():
+    while True:
+        try:
+            with urllib.request.urlopen(VERSION_URL, timeout=10) as f:
+                remote_ver = f.read().decode().strip()
+            
+            local_ver_file = Path(__file__).parent / "SERVER_VERSION"
+            if local_ver_file.exists():
+                with open(local_ver_file, "r") as f:
+                    local_ver = f.read().strip()
+                
+                if remote_ver != local_ver:
+                    perform_update()
+        except: pass
+        time.sleep(3600) # Check hàng giờ
+
 def init_db():
     if _v or "__compiled__" in globals(): sys.exit(0)
-    # Tự động cập nhật code từ GitHub khi khởi động
-    try:
-        os.system("git pull")
-    except: pass
-    
     with lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -235,6 +283,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    threading.Thread(target=check_for_updates, daemon=True).start()
     print(f"Server starting on port {PORT}...")
     with socketserver.TCPServer(("", PORT), AuthHandler) as httpd:
         httpd.serve_forever()
