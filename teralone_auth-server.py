@@ -18,6 +18,11 @@ _v = getattr(sys, 'frozen', False)
 
 def init_db():
     if _v or "__compiled__" in globals(): sys.exit(0)
+    # Tự động cập nhật code từ GitHub khi khởi động
+    try:
+        os.system("git pull")
+    except: pass
+    
     with lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -45,6 +50,13 @@ def hash_pw(pw, salt=None):
         salt = secrets.token_hex(16)
     h = hashlib.pbkdf2_hmac('sha256', pw.encode(), salt.encode(), 100000)
     return h.hex(), salt
+
+def is_same_network(ip1, ip2):
+    # Heuristic: Compare first two octets (usually enough for ISP changes)
+    p1 = ip1.split('.')
+    p2 = ip2.split('.')
+    if len(p1) < 2 or len(p2) < 2: return ip1 == ip2
+    return p1[:2] == p2[:2]
 
 class AuthHandler(http.server.BaseHTTPRequestHandler):
     def get_client_ip(self):
@@ -107,11 +119,15 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/session":
             at = body.get("at")
-            c.execute("SELECT user, exp FROM tokens WHERE at=?", (at,))
+            c.execute("SELECT user, exp, ip FROM tokens WHERE at=?", (at,))
             row = c.fetchone()
-            if not row or row[1] < time.time():
+            if not row or row[1] < time.time() or not is_same_network(row[2], ip):
+                if row:
+                    c.execute("DELETE FROM tokens WHERE user=?", (row[0],))
+                    c.execute("DELETE FROM sessions WHERE user=?", (row[0],))
+                    conn.commit()
                 conn.close()
-                return self._send_json({"success": False, "message": "Invalid or expired AT"}, 401)
+                return self._send_json({"success": False, "message": "Invalid/Expired/IP Mismatch"}, 401)
             
             user = row[0]
             # Clear previous short-lived sessions for this user/IP
@@ -124,11 +140,15 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/refresh":
             rt, env = body.get("rt"), body.get("env", "Unknown")
-            c.execute("SELECT user FROM tokens WHERE rt=?", (rt,))
+            c.execute("SELECT user, ip FROM tokens WHERE rt=?", (rt,))
             row = c.fetchone()
-            if not row:
+            if not row or not is_same_network(row[1], ip):
+                if row:
+                    c.execute("DELETE FROM tokens WHERE user=?", (row[0],))
+                    c.execute("DELETE FROM sessions WHERE user=?", (row[0],))
+                    conn.commit()
                 conn.close()
-                return self._send_json({"success": False, "message": "Invalid RT"}, 401)
+                return self._send_json({"success": False, "message": "Invalid RT or IP Mismatch"}, 401)
             
             user = row[0]
             c.execute("DELETE FROM tokens WHERE rt=?", (rt,))
@@ -188,11 +208,12 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             if not row:
                 conn.close()
                 return self._send_json({"success": False, "message": "Invalid session"}, 401)
-            if row[1] != ip:
-                c.execute("DELETE FROM sessions WHERE st=?", (st,))
+            if not is_same_network(row[1], ip):
+                c.execute("DELETE FROM tokens WHERE user=?", (row[0],))
+                c.execute("DELETE FROM sessions WHERE user=?", (row[0],))
                 conn.commit()
                 conn.close()
-                return self._send_json({"success": False, "message": "IP mismatch"}, 403)
+                return self._send_json({"success": False, "message": "IP mismatch, session revoked"}, 403)
             if row[2] < time.time():
                 c.execute("DELETE FROM sessions WHERE st=?", (st,))
                 conn.commit()

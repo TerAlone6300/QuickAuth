@@ -573,15 +573,26 @@ def perform_sync(store, force=False):
     if res.get("success"):
         # Merge downloaded data into local store
         if res.get("data"):
-            # Update local with server data (server takes precedence for existing keys, 
-            # but local new keys are already on server now)
+            # Update local with server data
             store.update(res["data"])
             store["__last_sync__"] = int(time.time())
             save_store(store)
             print(f" {Style.OK}Sync completed! ({len(res['data'])} accounts total){Style.RESET}")
         return store
     else:
-        print(f" {Style.FAIL}Sync error: {res.get('message')}{Style.RESET}")
+        if res.get("message") in ["Invalid/Expired/IP Mismatch", "IP mismatch, session revoked", "Invalid session", "Session expired"]:
+            print(f" {Style.FAIL}⚠️ Cảnh báo: Phiên đồng bộ đã bị hủy (có thể do IP thay đổi).{Style.RESET}")
+            # Xóa token cũ
+            save_data(TOKEN_FILE, {})
+            # Tạm dừng sync để tránh loop
+            store["__sync_enabled__"] = False
+            save_store(store)
+            
+            # Gợi ý re-login
+            if TUI.get_input("Bạn có muốn đăng nhập lại để khôi phục Sync? (y/N): ").lower() == 'y':
+                return setup_sync(store)
+        else:
+            print(f" {Style.FAIL}Sync error: {res.get('message')}{Style.RESET}")
         return store
 
 def check_user_exists(url, user):
