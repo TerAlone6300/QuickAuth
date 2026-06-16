@@ -779,13 +779,43 @@ def cmd_user(args, store, action):
     global AUTH_FILE, TOKEN_FILE
     if action == "auser":
         name = args[0] if args else TUI.get_input(f"{Style.INFO}New profile name:").strip()
-        if name:
+        if not name: return store
+
+        url = store.get("__sync_url__")
+        if not url:
+            url = TUI.get_input(f"{Style.INFO}Sync Server URL:{Style.RESET}").strip()
+            if not url: return store
+
+        exists = check_user_exists(url, name)
+        if exists:
+            pwd = TUI.get_input(f"{Style.INFO}Password for {name}:{Style.RESET}", password=True)
+            res = sync_request(url, "auth", {"user": name, "pass": pwd, "action": "login", "env": get_env_info()})
+        else:
+            print(f" {Style.WARN}User not found. Registering...{Style.RESET}")
+            pwd = TUI.get_input(f"{Style.INFO}New Password:{Style.RESET}", password=True)
+            res = sync_request(url, "auth", {"user": name, "pass": pwd, "action": "register", "env": get_env_info()})
+
+        if res.get("success"):
+            store["__current_user__"] = name
+            store["__sync_enabled__"] = True
+            store["__sync_url__"] = url
+            store["__sync_user__"] = name
+            save_store(store)
+
+            AUTH_FILE, _, TOKEN_FILE = get_storage_paths(name)
+            save_data(TOKEN_FILE, {"at": res["at"], "rt": res["rt"], "exp": res["exp"]})
+
+            print(f" {Style.OK}Profile `{name}` created and synced.{Style.RESET}")
+            return load_store()
+        else:
+            print(f" {Style.FAIL}Auth failed: {res.get('message')}{Style.RESET}")
+            if TUI.get_input("Keep local profile anyway? (y/N): ").lower() != 'y':
+                return store
             store["__current_user__"] = name
             save_store(store)
-            print(f" {Style.OK}Profile `{name}` created.{Style.RESET}")
             AUTH_FILE, _, TOKEN_FILE = get_storage_paths(name)
-            new_store = load_store()
-            return setup_sync(new_store)
+            return load_store()
+
     elif action == "cuser":
         profiles = sorted([p.name for p in BASE_DIR.iterdir() if p.is_dir() and p.name != "__pycache__"])
         if not profiles: profiles = ["user"]
