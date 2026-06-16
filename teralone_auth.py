@@ -97,6 +97,17 @@ class Style:
 # --- Environment Detection ---
 IS_COMPILED = getattr(sys, 'frozen', False) or "__compiled__" in globals()
 
+def get_env_info():
+    if os.path.exists('/data/data/com.termux'):
+        return "Android (Termux)"
+    elif os.name == 'nt':
+        return "Windows"
+    elif sys.platform == 'darwin':
+        return "macOS"
+    elif sys.platform == 'linux':
+        return "Linux"
+    return f"Python ({sys.platform})"
+
 # --- Storage Logic ---
 BASE_DIR = Path.home() / ".teralone_auth" if IS_COMPILED else Path(".")
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -513,7 +524,7 @@ def refresh_session(store):
     # 1. Check if AT is locally expired or close to (e.g., within 5 mins)
     if time.time() > exp - 300:
         # Try refresh AT
-        res = sync_request(url, "refresh", {"rt": rt})
+        res = sync_request(url, "refresh", {"rt": rt, "env": get_env_info()})
         if res.get("success"):
             tokens["at"] = res["at"]
             tokens["rt"] = res["rt"]
@@ -613,7 +624,7 @@ def setup_sync(store):
         exists = check_user_exists(url, user)
         if exists:
             pwd = TUI.get_input(f"{Style.INFO}Password:{Style.RESET}", password=True)
-            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "login"})
+            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "login", "env": get_env_info()})
         else:
             print(f" {Style.WARN}User not found. Creating new account...{Style.RESET}")
             pwd = TUI.get_input(f"{Style.INFO}Create a new password:{Style.RESET}", password=True)
@@ -622,7 +633,7 @@ def setup_sync(store):
                 print(f" {Style.FAIL}Passwords do not match!{Style.RESET}")
                 time.sleep(2)
                 continue
-            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "register"})
+            res = sync_request(url, "auth", {"user": user, "pass": pwd, "action": "register", "env": get_env_info()})
             
         if res.get("success"):
             store["__sync_enabled__"] = True
@@ -865,6 +876,54 @@ def cmd_passwd(store, tui=False):
     
     if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
 
+def cmd_sessions(store, tui=False):
+    if not store.get("__sync_enabled__"):
+        print(f" {Style.FAIL}Sync is not enabled.{Style.RESET}")
+        if tui: TUI.get_input("Press Enter...")
+        return
+    
+    tokens = load_data(TOKEN_FILE)
+    at = tokens.get("at")
+    url = store.get("__sync_url__")
+    
+    res = sync_request(url, "sessions/list", {"at": at})
+    if not res.get("success"):
+        print(f" {Style.FAIL}Error: {res.get('message')}{Style.RESET}")
+        if tui: TUI.get_input("Press Enter...")
+        return
+
+    sessions = res["sessions"]
+    if tui:
+        while True:
+            opts = []
+            for s in sessions:
+                tag = f" {Style.OK}(Current){Style.RESET}" if s["current"] else ""
+                opts.append(f"{s['id']} | {s['ip']} | {s['env']}{tag}")
+            
+            idx = TUI.menu(opts, "Active Sessions (Select to revoke)")
+            if idx is None: break
+            
+            target = sessions[idx]
+            if target["current"]:
+                print(f" {Style.WARN}Cannot revoke current session here. Use logout or dkey.{Style.RESET}")
+                time.sleep(1)
+                continue
+            
+            confirm = TUI.get_input(f"Revoke session {target['id']}? (y/N): ").lower()
+            if confirm == 'y':
+                rev = sync_request(url, "sessions/revoke", {"at": at, "target_id": target["id"]})
+                if rev.get("success"):
+                    print(f" {Style.OK}Session revoked.{Style.RESET}")
+                    sessions.pop(idx)
+                else:
+                    print(f" {Style.FAIL}Error: {rev.get('message')}{Style.RESET}")
+                time.sleep(1)
+    else:
+        print(f" {Style.HEADER}ID       | IP             | Environment      | Status{Style.RESET}")
+        for s in sessions:
+            tag = "Current" if s["current"] else ""
+            print(f" {s['id']:8} | {s['ip']:14} | {s['env']:16} | {tag}")
+
 def run_command_mode(store):
     TUI.clear()
     TUI.banner()
@@ -886,6 +945,7 @@ def run_command_mode(store):
                 "host": ["change"],
                 "sync": ["on", "off"],
                 "passwd": [],
+                "sessions": [],
                 "resync": [],
                 "mchange": [],
                 "help": [],
@@ -918,6 +978,7 @@ def run_command_mode(store):
             elif cmd == "host": store = cmd_host(args, store)
             elif cmd == "sync": store = cmd_sync_toggle(args, store)
             elif cmd == "passwd": store = cmd_passwd(store) or store
+            elif cmd == "sessions": cmd_sessions(store)
             elif cmd == "help":
                 print(f"""
  {Style.INFO}Commands:{Style.RESET}
@@ -935,6 +996,7 @@ def run_command_mode(store):
   host change    -> Change sync host
   sync <on/off>  -> Toggle sync
   passwd         -> Change sync password
+  sessions       -> Manage active login sessions
   resync         -> Synchronize data with server
   mchange        -> Switch to TUI mode
   exit           -> Quit application
@@ -947,7 +1009,7 @@ def run_command_mode(store):
 
 def run_tui_mode(store):
     while True:
-        options = ["Show live codes", "Import new key", "Edit key", "Delete key", "Profile Management", "Sync & Host", "Change Password", "Resync", "Mode Change", "Exit"]
+        options = ["Show live codes", "Import new key", "Edit key", "Delete key", "Profile Management", "Sync & Host", "Change Password", "Manage Sessions", "Resync", "Mode Change", "Exit"]
         choice = TUI.menu(options, "Main Menu")
         
         if choice == 0: # Show keys
@@ -980,14 +1042,16 @@ def run_tui_mode(store):
             if s_choice is not None: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
         elif choice == 6: # Password
             store = cmd_passwd(store, tui=True) or store
-        elif choice == 7: # Resync
+        elif choice == 7: # Sessions
+            cmd_sessions(store, tui=True)
+        elif choice == 8: # Resync
             store = perform_sync(store)
             TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
-        elif choice == 8: # Mode change
+        elif choice == 9: # Mode change
             store["__mode__"] = '1'
             save_store(store)
             return store, True
-        elif choice == 9 or choice is None:
+        elif choice == 10 or choice is None:
             TUI.clear()
             TUI.banner()
             print(f" {Style.OK}Goodbye! 👋{Style.RESET}")

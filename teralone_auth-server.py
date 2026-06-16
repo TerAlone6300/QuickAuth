@@ -24,7 +24,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS users 
                      (user TEXT PRIMARY KEY, pw TEXT, salt TEXT, data TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS tokens 
-                     (at TEXT PRIMARY KEY, user TEXT, exp REAL, rt TEXT)''')
+                     (at TEXT PRIMARY KEY, user TEXT, exp REAL, rt TEXT, ip TEXT, env TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS sessions 
                      (st TEXT PRIMARY KEY, user TEXT, ip TEXT, exp REAL)''')
         conn.commit()
@@ -81,7 +81,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"exists": exists})
 
         if path == "/auth":
-            user, pw, action = body.get("user"), body.get("pass"), body.get("action")
+            user, pw, action, env = body.get("user"), body.get("pass"), body.get("action"), body.get("env", "Unknown")
             if action == "register":
                 c.execute("SELECT 1 FROM users WHERE user=?", (user,))
                 if c.fetchone():
@@ -97,9 +97,9 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
                     return self._send_json({"success": False, "message": "Invalid credentials"}, 401)
             
             at, rt, exp = secrets.token_hex(32), secrets.token_hex(32), time.time() + 3*24*3600
-            c.execute("DELETE FROM tokens WHERE user=?", (user,))
-            c.execute("DELETE FROM sessions WHERE user=?", (user,))
-            c.execute("INSERT INTO tokens VALUES (?,?,?,?)", (at, user, exp, rt))
+            # Remove redundant sessions from same IP/Env to prevent bloat
+            c.execute("DELETE FROM tokens WHERE user=? AND ip=? AND env=?", (user, ip, env))
+            c.execute("INSERT INTO tokens VALUES (?,?,?,?,?,?)", (at, user, exp, rt, ip, env))
             conn.commit()
             conn.close()
             cleanup_db()
@@ -114,7 +114,8 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"success": False, "message": "Invalid or expired AT"}, 401)
             
             user = row[0]
-            c.execute("DELETE FROM sessions WHERE user=?", (user,))
+            # Clear previous short-lived sessions for this user/IP
+            c.execute("DELETE FROM sessions WHERE user=? AND ip=?", (user, ip))
             st, exp = secrets.token_hex(16), time.time() + 15*60
             c.execute("INSERT INTO sessions VALUES (?,?,?,?)", (st, user, ip, exp))
             conn.commit()
@@ -122,7 +123,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"success": True, "st": st})
 
         if path == "/refresh":
-            rt = body.get("rt")
+            rt, env = body.get("rt"), body.get("env", "Unknown")
             c.execute("SELECT user FROM tokens WHERE rt=?", (rt,))
             row = c.fetchone()
             if not row:
@@ -130,12 +131,39 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"success": False, "message": "Invalid RT"}, 401)
             
             user = row[0]
-            c.execute("DELETE FROM tokens WHERE user=?", (user,))
+            c.execute("DELETE FROM tokens WHERE rt=?", (rt,))
             at, nrt, exp = secrets.token_hex(32), secrets.token_hex(32), time.time() + 3*24*3600
-            c.execute("INSERT INTO tokens VALUES (?,?,?,?)", (at, user, exp, nrt))
+            c.execute("INSERT INTO tokens VALUES (?,?,?,?,?,?)", (at, user, exp, nrt, ip, env))
             conn.commit()
             conn.close()
             return self._send_json({"success": True, "at": at, "rt": nrt, "exp": exp})
+
+        if path == "/sessions/list":
+            at = body.get("at")
+            c.execute("SELECT user FROM tokens WHERE at=?", (at,))
+            row = c.fetchone()
+            if not row:
+                conn.close()
+                return self._send_json({"success": False, "message": "Unauthorized"}, 401)
+            user = row[0]
+            c.execute("SELECT at, ip, env, exp FROM tokens WHERE user=?", (user,))
+            rows = c.fetchall()
+            sessions = [{"id": r[0][:8], "ip": r[1], "env": r[2], "exp": r[3], "current": (r[0] == at)} for r in rows]
+            conn.close()
+            return self._send_json({"success": True, "sessions": sessions})
+
+        if path == "/sessions/revoke":
+            at, target_id = body.get("at"), body.get("target_id")
+            c.execute("SELECT user FROM tokens WHERE at=?", (at,))
+            row = c.fetchone()
+            if not row:
+                conn.close()
+                return self._send_json({"success": False, "message": "Unauthorized"}, 401)
+            user = row[0]
+            c.execute("DELETE FROM tokens WHERE user=? AND at LIKE ?", (user, target_id + "%"))
+            conn.commit()
+            conn.close()
+            return self._send_json({"success": True})
 
         if path == "/passwd":
             user, old_pw, new_pw = body.get("user"), body.get("old_pass"), body.get("new_pass")
