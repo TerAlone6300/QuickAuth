@@ -6,62 +6,39 @@ import hashlib
 import secrets
 import threading
 import sys
-from urllib.parse import parse_qs, urlparse
-
+import sqlite3
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 PORT = 8000
-# Dữ liệu server sẽ lưu cùng thư mục với script hoặc theo biến môi trường
-DATA_FILE = os.getenv("AUTH_SERVER_DATA", str(Path(__file__).parent / "server_data.json"))
+DB_FILE = os.getenv("AUTH_SERVER_DB", str(Path(__file__).parent / "auth_server.db"))
 lock = threading.Lock()
-
-# --- Security & Rate Limiting ---
 _v = getattr(sys, 'frozen', False)
-rate_limits = {}
 
-def is_rate_limited(ip):
-    now = time.time()
+def init_db():
+    if _v or "__compiled__" in globals(): sys.exit(0)
     with lock:
-        if ip not in rate_limits:
-            rate_limits[ip] = {"sec": [], "min": []}
-        rate_limits[ip]["sec"] = [t for t in rate_limits[ip]["sec"] if now - t < 1]
-        rate_limits[ip]["min"] = [t for t in rate_limits[ip]["min"] if now - t < 60]
-        if len(rate_limits[ip]["sec"]) >= 5 or len(rate_limits[ip]["min"]) >= 90:
-            return True
-        rate_limits[ip]["sec"].append(now)
-        rate_limits[ip]["min"].append(now)
-        return False
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users 
+                     (user TEXT PRIMARY KEY, pw TEXT, salt TEXT, data TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS tokens 
+                     (at TEXT PRIMARY KEY, user TEXT, exp REAL, rt TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS sessions 
+                     (st TEXT PRIMARY KEY, user TEXT, ip TEXT, exp REAL)''')
+        conn.commit()
+        conn.close()
 
-def load_db():
-    if _v: sys.exit(1)
+def cleanup_db():
     with lock:
-        if not os.path.exists(DATA_FILE):
-            return {"users": {}, "tokens": {}, "sessions": {}}
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"users": {}, "tokens": {}, "sessions": {}}
-
-def save_db(db):
-    if "__compiled__" in globals(): sys.exit(1)
-    with lock:
-        try:
-            now = time.time()
-            # Cleanup expired tokens
-            db["tokens"] = {k: v for k, v in db["tokens"].items() if v["exp"] > now}
-            # Cleanup expired sessions
-            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["exp"] > now}
-            
-            tmp_file = DATA_FILE + ".tmp"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(db, f, indent=2)
-            os.replace(tmp_file, DATA_FILE)
-        except Exception as e:
-            print(f"Error saving database: {e}")
-
-# --- Security & Rate Limiting ---
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        now = time.time()
+        c.execute("DELETE FROM tokens WHERE exp < ?", (now,))
+        c.execute("DELETE FROM sessions WHERE exp < ?", (now,))
+        conn.commit()
+        conn.close()
 
 def hash_pw(pw, salt=None):
     if salt is None:
@@ -71,16 +48,9 @@ def hash_pw(pw, salt=None):
 
 class AuthHandler(http.server.BaseHTTPRequestHandler):
     def get_client_ip(self):
-        # Priority: Cloudflare Header -> Proxy Header -> Direct Address
         cf_ip = self.headers.get('CF-Connecting-IP')
         forwarded = self.headers.get('X-Forwarded-For')
-        
-        if cf_ip:
-            return cf_ip
-        elif forwarded:
-            return forwarded.split(',')[0].strip()
-        else:
-            return self.client_address[0]
+        return cf_ip or (forwarded.split(',')[0].strip() if forwarded else self.client_address[0])
 
     def _send_json(self, data, status=200):
         self.send_response(status)
@@ -88,165 +58,134 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
-    def do_GET(self):
-        ip = self.get_client_ip()
-        if is_rate_limited(ip):
-            return self._send_json({"success": False, "message": "Rate limit exceeded"}, 429)
-
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == "/check":
-            return self._send_json({"success": False, "message": "Method Not Allowed. Use POST."}, 405)
-        
-        self._send_json({"message": "Not Found"}, 404)
-
     def do_POST(self):
+        # Fragmentation check
+        if _v: sys.exit(1)
+        
         ip = self.get_client_ip()
-        if is_rate_limited(ip):
-            return self._send_json({"success": False, "message": "Rate limit exceeded"}, 429)
-
         content_length = int(self.headers.get('Content-Length', 0))
         try:
             body = json.loads(self.rfile.read(content_length).decode())
         except:
             return self._send_json({"success": False, "message": "Invalid JSON"}, 400)
 
-        # Normalize path
         path = urlparse(self.path).path.rstrip('/')
-        db = load_db()
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
 
         if path == "/check":
             user = body.get("user")
-            return self._send_json({"exists": user in db["users"]})
+            c.execute("SELECT 1 FROM users WHERE user=?", (user,))
+            exists = c.fetchone() is not None
+            conn.close()
+            return self._send_json({"exists": exists})
 
         if path == "/auth":
-            user = body.get("user")
-            pw = body.get("pass")
-            action = body.get("action")
-            
+            user, pw, action = body.get("user"), body.get("pass"), body.get("action")
             if action == "register":
-                if user in db["users"]:
+                c.execute("SELECT 1 FROM users WHERE user=?", (user,))
+                if c.fetchone():
+                    conn.close()
                     return self._send_json({"success": False, "message": "User exists"}, 400)
                 hpw, salt = hash_pw(pw)
-                db["users"][user] = {"pw": hpw, "salt": salt, "data": {}}
+                c.execute("INSERT INTO users VALUES (?,?,?,?)", (user, hpw, salt, "{}"))
             elif action == "login":
-                if user not in db["users"]:
+                c.execute("SELECT pw, salt FROM users WHERE user=?", (user,))
+                row = c.fetchone()
+                if not row or hash_pw(pw, row[1])[0] != row[0]:
+                    conn.close()
                     return self._send_json({"success": False, "message": "Invalid credentials"}, 401)
-                stored_hpw = db["users"][user]["pw"]
-                salt = db["users"][user]["salt"]
-                hpw, _ = hash_pw(pw, salt)
-                if hpw != stored_hpw:
-                    return self._send_json({"success": False, "message": "Invalid credentials"}, 401)
-            else:
-                return self._send_json({"success": False, "message": "Invalid action"}, 400)
-
-            at = secrets.token_hex(32)
-            rt = secrets.token_hex(32)
-            exp = time.time() + 3*24*3600 # 3 days
             
-            # Clear old tokens for this user
-            db["tokens"] = {k: v for k, v in db["tokens"].items() if v["user"] != user}
-            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["user"] != user}
-            
-            db["tokens"][at] = {"user": user, "exp": exp, "rt": rt}
-            save_db(db)
+            at, rt, exp = secrets.token_hex(32), secrets.token_hex(32), time.time() + 3*24*3600
+            c.execute("DELETE FROM tokens WHERE user=?", (user,))
+            c.execute("DELETE FROM sessions WHERE user=?", (user,))
+            c.execute("INSERT INTO tokens VALUES (?,?,?,?)", (at, user, exp, rt))
+            conn.commit()
+            conn.close()
+            cleanup_db()
             return self._send_json({"success": True, "at": at, "rt": rt, "exp": exp})
 
         if path == "/session":
             at = body.get("at")
-            if at not in db["tokens"] or db["tokens"][at]["exp"] < time.time():
+            c.execute("SELECT user, exp FROM tokens WHERE at=?", (at,))
+            row = c.fetchone()
+            if not row or row[1] < time.time():
+                conn.close()
                 return self._send_json({"success": False, "message": "Invalid or expired AT"}, 401)
             
-            user = db["tokens"][at]["user"]
-            # Clear previous sessions for this user to save space
-            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["user"] != user}
-            
-            st = secrets.token_hex(16)
-            db["sessions"][st] = {
-                "user": user,
-                "ip": ip,
-                "exp": time.time() + 15*60
-            }
-            save_db(db)
+            user = row[0]
+            c.execute("DELETE FROM sessions WHERE user=?", (user,))
+            st, exp = secrets.token_hex(16), time.time() + 15*60
+            c.execute("INSERT INTO sessions VALUES (?,?,?,?)", (st, user, ip, exp))
+            conn.commit()
+            conn.close()
             return self._send_json({"success": True, "st": st})
 
         if path == "/refresh":
             rt = body.get("rt")
-            # Find AT linked to this RT
-            found_at = None
-            for k, v in db["tokens"].items():
-                if v["rt"] == rt:
-                    found_at = k
-                    break
-            
-            if not found_at:
+            c.execute("SELECT user FROM tokens WHERE rt=?", (rt,))
+            row = c.fetchone()
+            if not row:
+                conn.close()
                 return self._send_json({"success": False, "message": "Invalid RT"}, 401)
             
-            user = db["tokens"][found_at]["user"]
-            del db["tokens"][found_at]
-            
-            new_at = secrets.token_hex(32)
-            new_rt = secrets.token_hex(32)
-            exp = time.time() + 3*24*3600
-            db["tokens"][new_at] = {"user": user, "exp": exp, "rt": new_rt}
-            save_db(db)
-            return self._send_json({"success": True, "at": new_at, "rt": new_rt, "exp": exp})
+            user = row[0]
+            c.execute("DELETE FROM tokens WHERE user=?", (user,))
+            at, nrt, exp = secrets.token_hex(32), secrets.token_hex(32), time.time() + 3*24*3600
+            c.execute("INSERT INTO tokens VALUES (?,?,?,?)", (at, user, exp, nrt))
+            conn.commit()
+            conn.close()
+            return self._send_json({"success": True, "at": at, "rt": nrt, "exp": exp})
 
         if path == "/passwd":
-            user = body.get("user")
-            old_pw = body.get("old_pass")
-            new_pw = body.get("new_pass")
-            
-            if user not in db["users"]:
-                return self._send_json({"success": False, "message": "User not found"}, 404)
-            
-            stored_hpw = db["users"][user]["pw"]
-            salt = db["users"][user]["salt"]
-            hpw, _ = hash_pw(old_pw, salt)
-            
-            if hpw != stored_hpw:
+            user, old_pw, new_pw = body.get("user"), body.get("old_pass"), body.get("new_pass")
+            c.execute("SELECT pw, salt FROM users WHERE user=?", (user,))
+            row = c.fetchone()
+            if not row or hash_pw(old_pw, row[1])[0] != row[0]:
+                conn.close()
                 return self._send_json({"success": False, "message": "Invalid old password"}, 401)
             
-            new_hpw, new_salt = hash_pw(new_pw)
-            db["users"][user]["pw"] = new_hpw
-            db["users"][user]["salt"] = new_salt
-            
-            # Invalidate all tokens on password change for security
-            db["tokens"] = {k: v for k, v in db["tokens"].items() if v["user"] != user}
-            db["sessions"] = {k: v for k, v in db["sessions"].items() if v["user"] != user}
-            
-            save_db(db)
-            return self._send_json({"success": True, "message": "Password updated successfully"})
+            nhpw, nsalt = hash_pw(new_pw)
+            c.execute("UPDATE users SET pw=?, salt=? WHERE user=?", (nhpw, nsalt, user))
+            c.execute("DELETE FROM tokens WHERE user=?", (user,))
+            c.execute("DELETE FROM sessions WHERE user=?", (user,))
+            conn.commit()
+            conn.close()
+            return self._send_json({"success": True, "message": "Password updated"})
 
         if path == "/sync":
-            st = body.get("st")
-            if st not in db["sessions"]:
+            st, client_data = body.get("st"), body.get("data")
+            c.execute("SELECT user, ip, exp FROM sessions WHERE st=?", (st,))
+            row = c.fetchone()
+            if not row:
+                conn.close()
                 return self._send_json({"success": False, "message": "Invalid session"}, 401)
-            
-            session = db["sessions"][st]
-            if session["ip"] != ip:
-                del db["sessions"][st]
-                save_db(db)
-                return self._send_json({"success": False, "message": "IP mismatch, session revoked"}, 403)
-            
-            if session["exp"] < time.time():
-                del db["sessions"][st]
-                save_db(db)
+            if row[1] != ip:
+                c.execute("DELETE FROM sessions WHERE st=?", (st,))
+                conn.commit()
+                conn.close()
+                return self._send_json({"success": False, "message": "IP mismatch"}, 403)
+            if row[2] < time.time():
+                c.execute("DELETE FROM sessions WHERE st=?", (st,))
+                conn.commit()
+                conn.close()
                 return self._send_json({"success": False, "message": "Session expired"}, 401)
 
-            user = session["user"]
-            client_data = body.get("data") # {name: secret}
-            
-            if client_data: # Upload/Merge
-                db["users"][user]["data"].update(client_data)
-                save_db(db)
-            
-            return self._send_json({"success": True, "data": db["users"][user]["data"]})
+            user = row[0]
+            c.execute("SELECT data FROM users WHERE user=?", (user,))
+            db_data = json.loads(c.fetchone()[0])
+            if client_data:
+                db_data.update(client_data)
+                c.execute("UPDATE users SET data=? WHERE user=?", (json.dumps(db_data), user))
+                conn.commit()
+            conn.close()
+            return self._send_json({"success": True, "data": db_data})
 
+        conn.close()
         self._send_json({"message": "Not Found"}, 404)
 
 if __name__ == "__main__":
-    if _v or "__compiled__" in globals(): sys.exit(0)
-
+    init_db()
     print(f"Server starting on port {PORT}...")
     with socketserver.TCPServer(("", PORT), AuthHandler) as httpd:
         httpd.serve_forever()
