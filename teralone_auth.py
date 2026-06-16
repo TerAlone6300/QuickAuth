@@ -887,7 +887,7 @@ def cmd_passwd(store, tui=False):
     
     if tui: TUI.get_input(f"{Style.DIM}Press Enter to continue...{Style.RESET}")
 
-def cmd_sessions(args, store, tui=False):
+def cmd_sessions(store, tui=False):
     if not store.get("__sync_enabled__"):
         print(f" {Style.FAIL}Sync is not enabled.{Style.RESET}")
         if tui: TUI.get_input("Press Enter...")
@@ -897,17 +897,6 @@ def cmd_sessions(args, store, tui=False):
     at = tokens.get("at")
     url = store.get("__sync_url__")
     
-    if args and args[0] == "revoke" and len(args) > 1:
-        target_id = args[1]
-        confirm = TUI.get_input(f"Confirm revoke session {target_id}? (y/N): ").lower()
-        if confirm == 'y':
-            rev = sync_request(url, "sessions/revoke", {"at": at, "target_id": target_id})
-            if rev.get("success"):
-                print(f" {Style.OK}Session {target_id} revoked.{Style.RESET}")
-            else:
-                print(f" {Style.FAIL}Error: {rev.get('message')}{Style.RESET}")
-        return
-
     res = sync_request(url, "sessions/list", {"at": at})
     if not res.get("success"):
         print(f" {Style.FAIL}Error: {res.get('message')}{Style.RESET}")
@@ -927,15 +916,15 @@ def cmd_sessions(args, store, tui=False):
             
             target = sessions[idx]
             if target["current"]:
-                print(f" {Style.WARN}Cannot revoke current session here.{Style.RESET}")
+                print(f" {Style.WARN}Cannot revoke current session here. Use logout or dkey.{Style.RESET}")
                 time.sleep(1)
                 continue
             
-            confirm = TUI.get_input(f"CONFIRM revoke session {target['id']}? (y/N): ").lower()
+            confirm = TUI.get_input(f"Revoke session {target['id']}? (y/N): ").lower()
             if confirm == 'y':
                 rev = sync_request(url, "sessions/revoke", {"at": at, "target_id": target["id"]})
                 if rev.get("success"):
-                    print(f" {Style.OK}Session {target['id']} revoked.{Style.RESET}")
+                    print(f" {Style.OK}Session revoked.{Style.RESET}")
                     sessions.pop(idx)
                 else:
                     print(f" {Style.FAIL}Error: {rev.get('message')}{Style.RESET}")
@@ -945,7 +934,6 @@ def cmd_sessions(args, store, tui=False):
         for s in sessions:
             tag = "Current" if s["current"] else ""
             print(f" {s['id']:8} | {s['ip']:14} | {s['env']:16} | {tag}")
-        print(f"\n {Style.DIM}Use 'sessions revoke <id>' to revoke.{Style.RESET}")
 
 def run_command_mode(store):
     TUI.clear()
@@ -1001,7 +989,7 @@ def run_command_mode(store):
             elif cmd == "host": store = cmd_host(args, store)
             elif cmd == "sync": store = cmd_sync_toggle(args, store)
             elif cmd == "passwd": store = cmd_passwd(store) or store
-            elif cmd == "sessions": cmd_sessions(args, store)
+            elif cmd == "sessions": cmd_sessions(store)
             elif cmd == "help":
                 print(f"""
  {Style.INFO}Commands:{Style.RESET}
