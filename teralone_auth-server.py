@@ -171,8 +171,8 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             row = c.fetchone()
             if not row or row[1] < time.time() or not is_same_network(row[2], ip):
                 if row:
-                    c.execute("DELETE FROM tokens WHERE user=?", (row[0],))
-                    c.execute("DELETE FROM sessions WHERE user=?", (row[0],))
+                    # Only delete the specific invalid token, not everything for the user
+                    c.execute("DELETE FROM tokens WHERE at=?", (at,))
                     conn.commit()
                 conn.close()
                 return self._send_json({"success": False, "message": "Invalid/Expired/IP Mismatch"}, 401)
@@ -253,8 +253,8 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
                 return self._send_json({"success": False, "message": "Invalid session"}, 401)
             if not is_same_network(row[1], ip):
-                c.execute("DELETE FROM tokens WHERE user=?", (row[0],))
-                c.execute("DELETE FROM sessions WHERE user=?", (row[0],))
+                # Only delete the specific session token that failed, not all tokens
+                c.execute("DELETE FROM sessions WHERE st=?", (st,))
                 conn.commit()
                 conn.close()
                 return self._send_json({"success": False, "message": "IP mismatch, session revoked"}, 403)
