@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 PORT = 8000
-DB_FILE = os.getenv("AUTH_SERVER_DB", str(Path(__file__).parent / "auth_server.db"))
+DB_FILE = os.path.abspath(os.getenv("AUTH_SERVER_DB", str(Path(__file__).parent / "auth_server.db")))
 VERSION_URL = "https://raw.githubusercontent.com/TerAlone6300/QuickAuth/main/SERVER_VERSION"
 ZIP_URL = "https://github.com/TerAlone6300/QuickAuth/archive/refs/heads/main.zip"
 lock = threading.Lock()
@@ -170,10 +170,6 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
             c.execute("SELECT user, exp, ip FROM tokens WHERE at=?", (at,))
             row = c.fetchone()
             if not row or row[1] < time.time() or not is_same_network(row[2], ip):
-                if row:
-                    # Only delete the specific invalid token, not everything for the user
-                    c.execute("DELETE FROM tokens WHERE at=?", (at,))
-                    conn.commit()
                 conn.close()
                 return self._send_json({"success": False, "message": "Invalid/Expired/IP Mismatch"}, 401)
             
